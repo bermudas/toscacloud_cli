@@ -71,6 +71,11 @@ python tosca_cli.py playlists list
 | `requirements.txt` | Runtime dependencies |
 | `swaggers/` | Tenant-specific swagger exports for reference (gitignored) |
 | `README.md` | User-facing docs |
+| `CLAUDE.md` | This file — project guide for Claude Code |
+| `.github/agents/tosca.agent.md` | TOSCA Automation agent instructions (full reference: decision tree, CLI commands, caveats, Web + SAP how-to) |
+| `tosca-automation/SKILL.md` | Agent Skills package (agentskills.io spec) — condensed skill with links to references/ |
+| `tosca-automation/references/web-automation.md` | Html engine how-to (module structure, standard module IDs, Playwright discovery, 4-folder pattern) |
+| `tosca-automation/references/sap-automation.md` | SapEngine how-to (standard module IDs, Precondition block, RelativeId patterns, ControlFlowItemV2) |
 
 ## Dependencies (requirements.txt)
 

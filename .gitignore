@@ -1,0 +1,31 @@
+# Virtual environment
+.venv/
+
+# Runtime secrets & config (use .env.example as template)
+.env
+config.env
+~/.tosca_cli/
+
+# Tenant-specific swagger exports (download fresh from your tenant's /apiDocs/swagger)
+swaggers/
+
+# Cached OAuth2 token
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Scratch / dev probe scripts
+_probe.py
+
+# JUnit / result exports
+junit-results.xml
+
+# macOS
+.DS_Store

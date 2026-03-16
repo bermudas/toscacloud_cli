@@ -1,7 +1,7 @@
 ---
 description: "Use when working with Tricentis TOSCA Cloud: creating test cases, modules, playlists, folders, running tests, importing/exporting TSU files, searching inventory, working with reuseable test step blocks, or any TOSCA CLI automation task."
 name: "TOSCA Automation"
-tools: [read, search, execute, edit, todo]
+tools: [execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, execute/runNotebookCell, execute/testFailure, read/terminalSelection, read/terminalLastCommand, read/getNotebookSummary, read/problems, read/readFile, read/readNotebookCellOutput, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/searchResults, search/textSearch, search/usages, playwright_mcp/browser_click, playwright_mcp/browser_close, playwright_mcp/browser_console_messages, playwright_mcp/browser_drag, playwright_mcp/browser_evaluate, playwright_mcp/browser_file_upload, playwright_mcp/browser_fill_form, playwright_mcp/browser_handle_dialog, playwright_mcp/browser_hover, playwright_mcp/browser_install, playwright_mcp/browser_navigate, playwright_mcp/browser_navigate_back, playwright_mcp/browser_network_requests, playwright_mcp/browser_press_key, playwright_mcp/browser_resize, playwright_mcp/browser_run_code, playwright_mcp/browser_select_option, playwright_mcp/browser_snapshot, playwright_mcp/browser_tabs, playwright_mcp/browser_take_screenshot, playwright_mcp/browser_type, playwright_mcp/browser_wait_for, todo]
 argument-hint: "Describe the TOSCA task (e.g. 'create a test case for login flow', 'run smoke playlist and show failures', 'move all Web test cases into the Regression folder')"
 ---
 
@@ -73,6 +73,15 @@ User wants to MOVE/ORGANIZE?
 User wants to EXPORT/IMPORT?
   → cases export-tsu --ids "id1,id2" --output file.tsu
   → cases import-tsu --file file.tsu
+
+User wants to CREATE a WEB test case from scratch?
+  → Use Playwright MCP to navigate the target URL and snapshot the page (see Web Automation section)
+  → Note the InnerText / HREF / ClassName values for each element to click or interact with
+  → modules create --name "<AppName> | <PageName>" → then modules update <id> --json-file <body.json>
+    to add attributes with the right TechnicalId parameters (Tag, InnerText, HREF, ClassName)
+  → Use Html.OpenUrl standard module for the first step (see standard module IDs below)
+  → cases create → cases update <id> --json-file <case.json>
+  → inventory move testCase <id> --folder-id <folderId>
 ```
 
 ## Key CLI Commands (Quick Reference)
@@ -104,6 +113,7 @@ python tosca_cli.py blocks delete <blockId> --force
 # Modules
 python tosca_cli.py modules get <moduleId>
 python tosca_cli.py modules create --name "..." --iface Gui
+python tosca_cli.py modules update <moduleId> --json-file <body.json>   # full PUT replacement (add attributes)
 
 # Playlists
 python tosca_cli.py playlists list
@@ -148,6 +158,9 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | `--json` flag placement | Always place `--json` **before** positional arguments: `cases get --json <id>` ✓, `cases get <id> --json` ✓, but `cases get -- <id> --json` ✗ — the `--` end-of-options separator causes Typer to treat `--json` as a positional arg, silently falling back to Rich display output. |
 | Block IDs ≠ Module entity IDs | `inventory search --type Module` returns `entityId` values for modules, but these do **not** work with `blocks get`. Block IDs must be extracted from a test case: `cases get --json <caseId>` → look for `testCaseItems[].reusableTestStepBlockId` where `$type == "TestStepFolderReferenceV2"`. |
 | Entity ID truncation in table output | The table view truncates IDs with `…`. Always use `--json` to get full entity IDs before passing them to other commands. |
+| Html standard module IDs (framework) | `Html.OpenUrl` module id: `9f8d14b3-7651-4add-bcfe-341a996662cc`, Url attr ref: `39e342b2-960b-2251-d1b9-5b340c12fa19`. These are framework-provided — they don't appear in `inventory search --type Module` but work in test step values. |
+| `modules update` returns empty `{}` | A 200/204 with empty body is normal — verify with `modules get <id> --json` afterwards to confirm attributes were saved. |
+| Web module attributes need full parameter set | Each attribute in an Html module requires: `BusinessAssociation=Descendants`, `Engine=Html`, `Tag`, `InnerText` (and optionally `HREF`/`ClassName`) — omitting any TechnicalId may cause TOSCA to fail to locate the element. |
 
 ## Undocumented APIs Available
 
@@ -155,6 +168,171 @@ These are implemented in the CLI and work on the live tenant:
 
 - **Inventory v1 folder ops**: create-folder, rename-folder, delete-folder, folder-ancestors, folder-tree
 - **MBT TSU**: export-tsu (→ binary blob), import-tsu (multipart upload)
+
+## Web Automation (Html Engine) — How-To
+
+TOSCA Cloud uses an **Html engine** for browser-based test automation. You build modules that map to page elements, then reference them in test step values.
+
+### Playwright-assisted module discovery workflow
+
+When asked to create a web test, use Playwright MCP to explore the target URL before writing any TOSCA JSON:
+
+```
+1. browser_navigate <url>           — load the page
+2. browser_snapshot                 — get the accessibility tree (ref IDs, text, roles)
+3. browser_click ref=<refId>        — click a nav link / button to advance to the next page
+4. browser_snapshot                 — capture the new URL and page state
+5. Repeat step 3–4 to map the full user journey
+```
+
+From the snapshot, extract for each element you need to interact with:
+- **InnerText** — the visible text content of the element (most reliable identifier)
+- **HREF** — for `<a>` tags (secondary identifier, combine with InnerText)
+- **ClassName** — CSS class for elements without unique text (e.g. icon buttons)
+- **Tag** — HTML tag (`A`, `BUTTON`, `INPUT`, etc.)
+
+### Module structure for Html elements
+
+Each interactable element on a page becomes one **attribute** on a `HtmlDocument` module. The attribute's `parameters` array holds the technical identifiers TOSCA uses to locate the element:
+
+```json
+{
+  "$type": "ApiModuleV2",
+  "id": "<moduleId>",
+  "name": "<AppName> | <PageName>",
+  "businessType": "HtmlDocument",
+  "interfaceType": "Gui",
+  "attributes": [
+    {
+      "id": "<fresh-ULID-or-fixed-id>",
+      "name": "<HumanLabel>",
+      "businessType": "Link",
+      "defaultActionMode": "Input",
+      "defaultDataType": "String",
+      "defaultOperator": "Equals",
+      "valueRange": ["{Click}", "{Rightclick}"],
+      "isVisible": true,
+      "isRecursive": false,
+      "cardinality": "ZeroToOne",
+      "interfaceType": "Gui",
+      "parameters": [
+        {"name": "BusinessAssociation", "value": "Descendants",  "type": "Configuration"},
+        {"name": "Engine",              "value": "Html",          "type": "Configuration"},
+        {"name": "Tag",                 "value": "A",             "type": "TechnicalId"},
+        {"name": "InnerText",           "value": "<linkText>",    "type": "TechnicalId"},
+        {"name": "HREF",                "value": "/path",         "type": "TechnicalId"}
+      ]
+    }
+  ]
+}
+```
+
+**businessType by element kind:**
+
+| Element | `businessType` | Typical `valueRange` |
+|---------|---------------|---------------------|
+| `<a>` nav link | `Link` | `["{Click}", "{Rightclick}"]` |
+| `<button>`, submit | `Button` | `["{Click}"]` |
+| `<input type=text>` | `TextBox` | `["{Click}", "{Doubleclick}", "{Rightclick}"]` |
+| `<input type=password>` | `TextBox` | same as TextBox, use `dataType: Password` in the step value |
+| `<input type=checkbox>` | `Checkbox` | `["{Click}"]` |
+| `<select>` | `Combobox` | `["{Select}"]` |
+| page / document root | `HtmlDocument` | — (module-level businessType only) |
+
+### Standard Html framework modules (always available, no inventory entry)
+
+These are provided by the Html engine package and **do not appear in `inventory search --type Module`**:
+
+| Module name | Module ID | Key attribute ref ID | Purpose |
+|-------------|-----------|---------------------|--------|
+| `OpenUrl` | `9f8d14b3-7651-4add-bcfe-341a996662cc` | Url: `39e342b2-960b-2251-d1b9-5b340c12fa19` | Navigate to a URL |
+
+Use these IDs directly in `moduleReference.id` and `moduleAttributeReference.id` without creating a module.
+
+### Step 1 — always OpenUrl
+
+Every web test case should start with an `OpenUrl` step in the **Precondition** folder:
+
+```json
+{
+  "$type": "TestStepV2",
+  "name": "OpenUrl – https://example.com",
+  "moduleReference": {
+    "id": "9f8d14b3-7651-4add-bcfe-341a996662cc",
+    "packageReference": {"id": "Html", "type": "Standard"},
+    "metadata": {"isRescanEnabled": false, "engine": "Framework"}
+  },
+  "testStepValues": [{
+    "name": "Url",
+    "value": "https://example.com",
+    "actionMode": "Input",
+    "dataType": "String",
+    "operator": "Equals",
+    "moduleAttributeReference": {
+      "id": "39e342b2-960b-2251-d1b9-5b340c12fa19",
+      "moduleId": "9f8d14b3-7651-4add-bcfe-341a996662cc",
+      "packageReference": {"id": "Html", "type": "Standard"}
+    }
+  }]
+}
+```
+
+### Full web test creation workflow
+
+```bash
+# 1. Use Playwright MCP to explore the app and map the user journey
+#    Record: element InnerText, HREF, Tag, ClassName for each step
+
+# 2. Check for an existing module covering this page
+python tosca_cli.py inventory search "<AppName>" --type Module
+
+# 3a. If module exists — get it and confirm attribute IDs
+python tosca_cli.py modules get <moduleId> --json
+
+# 3b. If no module — create shell, then PUT full body with attributes
+python tosca_cli.py modules create --name "<AppName> | <PageName>" --iface Gui --json
+# → save the returned module ID
+# → write module JSON to a file (see structure above)
+python tosca_cli.py modules update <moduleId> --json-file /tmp/<page>_module.json --json
+python tosca_cli.py modules get <moduleId> --json   # verify attributes saved
+
+# 4. Create the test case shell
+python tosca_cli.py cases create --name "<AppName> – <flow description>" --state Planned --json
+# → save the case ID
+
+# 5. Write the test case JSON (Precondition + Process folders)
+#    - Precondition: one OpenUrl step (use standard module IDs above)
+#    - Process: one TestStepV2 per action, referencing your page module's attribute IDs
+
+# 6. PUT the full case body
+python tosca_cli.py cases update <caseId> --json-file /tmp/<flow>_case.json --json
+
+# 7. Verify
+python tosca_cli.py cases steps <caseId>
+
+# 8. Move to the right folder
+python tosca_cli.py inventory move testCase <caseId> --folder-id <folderId>
+```
+
+### Test case configuration
+
+Always include a `Browser` configuration parameter — this determines which browser TOSCA launches:
+
+```json
+"testConfigurationParameters": [
+  {"name": "Browser", "value": "Chrome", "dataType": "String"}
+]
+```
+
+Supported values: `Chrome`, `Edge`, `Firefox`.
+
+### Reusing existing scanned modules vs. creating new ones
+
+- If a test case for the same app already exists, **always** check `cases steps <existingCaseId> --json` first — TOSCA Studio may have already scanned the page and created a `HtmlDocument` module with all attributes. Reuse that module's `id` and attribute `id` values verbatim.
+- Only create a new module when no existing scanned copy exists.
+- The difference: scanned modules have self-healing data (`SelfHealingData` steering parameter with a JSON blob) — manually created ones don't. Both work, but scanned modules are more resilient to minor DOM changes.
+
+---
 
 ## Reuseable Test Step Blocks — Deep Dive
 

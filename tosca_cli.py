@@ -401,6 +401,15 @@ class ToscaClient:
         result = self.post(self.mbt("modules"), body)
         return result if isinstance(result, dict) else {}
 
+    def update_module(self, module_id: str, body: dict) -> dict:
+        """
+        PUT /{spaceId}/_mbt/api/v2/builder/modules/{id}
+        Full replacement of a module — body must include id, name, attributes[].
+        Returns updated ModuleV2.
+        """
+        result = self.put(self.mbt(f"modules/{module_id}"), body)
+        return result if isinstance(result, dict) else {}
+
     def delete_module(self, module_id: str) -> None:
         """DELETE /{spaceId}/_mbt/api/v2/builder/modules/{id}  (→ 202)"""
         self.delete(self.mbt(f"modules/{module_id}"))
@@ -1577,6 +1586,30 @@ def modules_create(
 
     uid = result.get("id", "?")
     console.print(f"[green]✓ Created module[/green] [bold]{name}[/bold] → Id: [cyan]{uid}[/cyan]")
+
+
+@modules_app.command("update")
+def modules_update(
+    module_id:  str  = typer.Argument(..., help="Module Id"),
+    json_file:  str  = typer.Option(..., "--json-file", "-f", help="Path to module JSON file (full ModuleV2 body)"),
+    as_json:    bool = typer.Option(False, "--json", help="Raw JSON output"),
+):
+    """Replace a module with a full PUT body (ModuleV2 JSON file)."""
+    import json as _json
+    try:
+        body = _json.loads(Path(json_file).read_text())
+    except Exception as e:
+        _exit_err(f"Could not read {json_file}: {e}")
+    client = ToscaClient()
+    try:
+        result = client.update_module(module_id, body)
+    except ToscaError as e:
+        _exit_err(str(e))
+    if as_json:
+        _output_json(result)
+        return
+    name = result.get("name", module_id)
+    console.print(f"[green]✓ Updated module[/green] [bold]{name}[/bold] [cyan]{module_id}[/cyan]")
 
 
 @modules_app.command("delete")

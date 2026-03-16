@@ -82,6 +82,19 @@ User wants to CREATE a WEB test case from scratch?
   → Use Html.OpenUrl standard module for the first step (see standard module IDs below)
   → cases create → cases update <id> --json-file <case.json>
   → inventory move testCase <id> --folder-id <folderId>
+
+User wants to CREATE a SAP GUI test case?
+  → inventory search "<TCODE>" --type Module to find existing screen modules
+  → if modules missing: modules create --name "<TCODE> | <Screen>" --iface Gui
+      then modules update <id> --json-file with Window businessType + SapEngine + RelativeId attributes
+  → cases create --name "..." --state Planned
+  → build test case JSON:
+      testConfigurationParameters: Username (String) + Password (Password)
+      testCaseItems[0]: TestStepFolderReferenceV2 → Precondition block b0e929fa (5 params)
+      testCaseItems[1+]: Process/Verification folders with T-code steps + screen modules
+  → cases update <id> --json-file <case.json>
+  → inventory move testCase <id> --folder-id <folderId>
+  (see SAP GUI Automation section for all standard module IDs and RelativeId patterns)
 ```
 
 ## Key CLI Commands (Quick Reference)
@@ -167,6 +180,14 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | `{CP[ParamName]}` syntax for config params | Test step values can reference test configuration parameters using `{CP[ParameterName]}` — used for Username/Password and other per-execution overrides. |
 | `Container` businessType for error message divs | To verify text inside a `<div>`/`<span>` error container, use `businessType: "Container"` on the module attribute with `actionMode: "Verify"` + `actionProperty: "InnerText"`. |
 | Standard non-Html framework modules | `CloseBrowser` (`3019e887-48ca-4a7e-8759-79e7762c6152`, Title attr: `39e342b2-958e-3e2f-7c85-29871c23f1dc`); `Wait` Timing (`80b7982e-0e10-4bc0-bdf3-6bc04503fd63`, Duration attr: `39e342b2-958e-ba1f-bb58-702e193d6016`, ms); `Buffer` (`8415c10d-ab41-44a7e-949a-602f4dddd2d2`, Buffername attr: `39e342b2-958e-0a6b-cbfd-5fdd372ca255`). |
+| SAP standard framework modules are NOT in Inventory | `inventory search --type Module` never returns SAP framework modules (`SAP Logon`, `SAP Login`, `T-code`). These are engine-provided. Use their IDs directly (see SAP GUI section). |
+| SAP modules have `businessType: "Window"` (not HtmlDocument) | SAP inventory modules use `"businessType": "Window"` at the module level. Using `HtmlDocument` or any other value will break scan/execution. |
+| SAP TechnicalId uses `RelativeId` only | SAP modules identify elements via a single `RelativeId` parameter (e.g. `/usr/ctxtANLA-ANLKL`). Never add `Tag`, `InnerText`, or `HREF` params to SAP attributes. |
+| SAP TabControl uses `actionMode: "Select"` | When setting a tab value in a test step, always use `"actionMode": "Select"` — not `"Input"`. Using `"Input"` for a tab has no effect. |
+| Precondition block b0e929fa — always first item | Every SAP test case must have the Precondition reusable block as `testCaseItems[0]`. It handles taskkill → SAP Logon → SAP Login. Never skip or inline these steps. |
+| ProcessOperations uses `subValues` for CLI arguments | The `Arguments` test step value uses `"actionMode": "Select"` with individual `Argument` items in `subValues[]`. Putting multiple args in one `value` string does not work. |
+| SAP test cases have NO `Browser` config param | SAP GUI cases omit `Browser`. Only include `Username` (String) + `Password` (Password) in `testConfigurationParameters`. |
+| `ControlFlowItemV2` for optional SAP popups | Use `"$type": "ControlFlowItemV2"` with `"statementTypeV2": "If"` to handle SAP screens that may or may not appear at runtime. The `condition` holds Verify steps; `conditionPassed` holds the action steps. |
 
 ## Undocumented APIs Available
 
@@ -494,6 +515,293 @@ python tosca_cli.py cases update <caseId> --json-file updated_case.json
 The CLI uses Crockford base32: 10 timestamp chars + 16 random chars = 26-char string.
 Generate a **fresh** ULID for each: new businessParameter, new parameterLayerId, new parameter entry in a test case.
 **Never reuse** ULIDs across different cases or parameter slots — the server may silently ignore duplicates.
+
+---
+
+## SAP GUI Automation (SapEngine) — How-To
+
+TOSCA Cloud drives SAP GUI via the native **SapEngine**. Unlike web testing there is no browser — TOSCA connects to the SAP GUI thick client. The module and step structure is different from the Html engine.
+
+### SAP engine fundamentals vs Html
+
+| Property | Html engine | SAP engine |
+|----------|------------|------------|
+| Module `businessType` | `HtmlDocument` | `Window` |
+| `interfaceType` | `Gui` | `Gui` |
+| Attribute `Engine` config param | `Html` | `SapEngine` |
+| TechnicalId locator param | `Tag`, `InnerText`, `HREF`, `ClassName` | `RelativeId` (SAP GUI element path) |
+| Browser config param | `Browser: Chrome/Edge/Firefox` | **None** — no browser |
+| Session startup | `OpenUrl` standard module | `Precondition` reusable block (b0e929fa) |
+
+### Standard SAP framework modules (always available, not in inventory)
+
+These are provided by the `Sap` engine package and **do not appear in `inventory search --type Module`**. Use their IDs directly.
+
+| Step name | Module ID | Attribute | Attr ref ID | Notes |
+|-----------|-----------|-----------|-------------|-------|
+| `Close SAP Logon` | `1b9ae625-f924-4837-89b4-63da94bbd701` | `Path` | `39e342b2-958e-f3b9-4561-e4b466384784` | Value: `taskkill`; package `ProcessOperations/Standard` |
+| same | same | `Arguments` | `39e342b2-958e-8357-d519-dc29dbb4d77f` | `actionMode: "Select"`; children are `subValues` |
+| same | same | `Argument` (subValue) | `39e342b2-958e-b1d9-61c7-6718ae8be275` | Repeatable; e.g. `/f`, `/im`, `saplogon.exe` |
+| `SAP Logon` (launch Logon Pad) | `3c3b1139-48a5-4ad0-a33c-72b3cbbc30f7` | `SapLogonPath` | `39e342b2-961b-0690-437e-9ff959a98288` | Path to `saplogon.exe` on the agent |
+| same | same | `SapConnection` | `39e342b2-961b-3ba0-e24a-644888d69eeb` | Connection name as it appears in SAP Logon |
+| `SAP Login` (login screen) | `24437bbe-dcd2-441c-bdd4-37537c0bde99` | `Client` | `39e342b2-961b-4340-b56e-50e7fd7f1bab` | SAP client number |
+| same | same | `User` | `39e342b2-961b-d3b0-29f7-fae93ac1f0e3` | Use `{CP[Username]}` |
+| same | same | `Password` | `39e342b2-961b-4754-ea0c-ebc747c29cd0` | Use `{CP[Password]}` with `dataType: "Password"` |
+| same | same | `Enter` | `39e342b2-961b-ef6e-24bf-07d5c81dc707` | Button; value `"X"` to click |
+| `T-code` (run transaction) | `35fcfe84-c373-4b53-869b-604af40a689e` | `Transaction code` | `39e342b2-961b-de12-c278-888795c3d7dc` | TextBox; enter T-code string (e.g. `"FBCJ"`) |
+| same | same | `Buttons` | `39e342b2-961b-bff2-cf38-9a91cd40a637` | ButtonGroup; value `"Enter"` to confirm |
+| `Wait` | `80b7982e-0e10-4bc0-bdf3-6bc04503fd63` | `Duration` | `39e342b2-958e-ba1f-bb58-702e193d6016` | Same as web section; value in ms, `dataType: Numeric` |
+
+### Precondition reusable block — universal SAP session startup
+
+Block `b0e929fa-1038-4246-9ab7-b4878f41d66e` (`Precondition`) handles the full SAP startup sequence. **Always reuse this block** as the first `testCaseItem` — never inline these steps.
+
+**Block `businessParameters`:**
+
+| Name | Parameter ID (ULID) |
+|------|---------------------|
+| `SapLogonPath` | `01KHJSJ4D4AY1BG2KDK4BAK1TD` |
+| `SapConnection` | `01KHJSJ6H4EVTFQVGTKSVGA05G` |
+| `Client` | `01KHJSJ8TFB32TV3W42JFMYCFN` |
+| `User` | `01KHJSJB7H6QNQER4WK6P5NS8N` |
+| `Password` | `01KHJSJDM36KRJHSBV5PRN8035` |
+
+**Internal steps (in order):**
+1. `ProcessOperations` — `taskkill /f /im saplogon.exe` (kills any existing SAP session)
+2. `Timing.Wait` — 5000 ms
+3. `SAP Logon` — opens SAP Logon Pad, selects the connection
+4. `SAP Login` — fills Client / User / Password via `{PL[...]}` references, clicks Enter
+
+**How to reference the Precondition block in a test case (first `testCaseItem`):**
+
+```json
+{
+  "$type": "TestStepFolderReferenceV2",
+  "reusableTestStepBlockId": "b0e929fa-1038-4246-9ab7-b4878f41d66e",
+  "parameterLayerId": "<fresh-ULID>",
+  "parameters": [
+    { "id": "<fresh-ULID>", "referencedParameterId": "01KHJSJ4D4AY1BG2KDK4BAK1TD", "value": "C:\\Program Files\\SAP\\FrontEnd\\SAPgui\\saplogon.exe" },
+    { "id": "<fresh-ULID>", "referencedParameterId": "01KHJSJ6H4EVTFQVGTKSVGA05G", "value": "E93" },
+    { "id": "<fresh-ULID>", "referencedParameterId": "01KHJSJ8TFB32TV3W42JFMYCFN", "value": "100" },
+    { "id": "<fresh-ULID>", "referencedParameterId": "01KHJSJB7H6QNQER4WK6P5NS8N", "value": "{CP[Username]}" },
+    { "id": "<fresh-ULID>", "referencedParameterId": "01KHJSJDM36KRJHSBV5PRN8035", "value": "{CP[Password]}" }
+  ],
+  "id": "<fresh-ULID>",
+  "name": "Precondition",
+  "disabled": false
+}
+```
+
+### SAP test case configuration
+
+SAP cases use `Username` + `Password` config params. There is **no** `Browser` param:
+
+```json
+"testConfigurationParameters": [
+  { "name": "Username", "value": "your_user", "dataType": "String" },
+  { "name": "Password", "dataType": "Password", "password": { "id": "<encryptedId>" } }
+]
+```
+
+### Standard 4-folder SAP test case structure
+
+```
+Precondition   — TestStepFolderReferenceV2 → block b0e929fa (SAP startup + login)
+Process        — TestStepFolderV2 containing sub-folders per T-code:
+                   Sub-folder: T-code step (35fcfe84) + SAP screen interaction steps
+                   ControlFlowItemV2 (If): conditional popup handling (see below)
+Verification   — (optional) Verify steps using inventory screen modules
+Teardown       — (optional) close SAP or Wait steps
+```
+
+**Typical Process sub-folder sequence for one transaction:**
+1. `TestStepV2` with T-code module `35fcfe84` — enter T-code + `Buttons: "Enter"`
+2. `ControlFlowItemV2` If/Then — check for optional popup; fill it if present
+3. `TestStepV2` with inventory screen module — fill fields, select tabs, click buttons
+
+### SAP inventory module structure
+
+SAP screen modules are regular Inventory modules but follow a different pattern from Html modules:
+
+```json
+{
+  "$type": "ApiModuleV2",
+  "id": "<moduleId>",
+  "name": "FBCJ | Cash Journal: Initial Data pop up",
+  "businessType": "Window",
+  "interfaceType": "Gui",
+  "attributes": [
+    {
+      "id": "<attrId>",
+      "name": "Posting Date",
+      "businessType": "TextBox",
+      "defaultActionMode": "Input",
+      "defaultDataType": "String",
+      "defaultOperator": "Equals",
+      "valueRange": ["{Click}", "{Doubleclick}", "{Rightclick}"],
+      "isVisible": true,
+      "isRecursive": false,
+      "cardinality": "ZeroToOne",
+      "interfaceType": "Gui",
+      "parameters": [
+        { "name": "BusinessAssociation", "value": "Descendants",        "type": "Configuration" },
+        { "name": "Engine",              "value": "SapEngine",          "type": "Configuration" },
+        { "name": "RelativeId",          "value": "/usr/ctxtBDATU_PAD", "type": "TechnicalId"   }
+      ]
+    }
+  ]
+}
+```
+
+**`RelativeId` patterns by SAP element type:**
+
+| Element type | SAP GUI prefix | Example |
+|-------------|----------------|---------|
+| Text / char input field | `/usr/ctxt` | `/usr/ctxtANLA-ANLKL` |
+| Numeric input field | `/usr/txt` | `/usr/txtBETRG-1` |
+| Button | `/usr/btn` | `/usr/btnFB_TODAY` |
+| Tab strip control | `/usr/tabs` | `/usr/tabsTS_BUKRS` |
+| Checkbox | `/usr/chk` | `/usr/chkFLAG-1` |
+| Combobox / dropdown | `/usr/sub` or `/usr/cntl` | varies |
+
+**`ControlGroup` pattern (toolbar / button group):**
+When several buttons belong to one toolbar region, model them as a `ControlGroup` attribute with nested child `Button` attributes:
+
+```json
+{
+  "id": "<groupId>",
+  "name": "Toolbar",
+  "businessType": "ControlGroup",
+  "interfaceType": "Gui",
+  "attributes": [
+    {
+      "id": "<btnId>",
+      "name": "Today",
+      "businessType": "Button",
+      "valueRange": ["{Click}"],
+      "parameters": [
+        { "name": "Engine",     "value": "SapEngine",      "type": "Configuration" },
+        { "name": "RelativeId", "value": "/usr/btnFB_TODAY","type": "TechnicalId"   }
+      ]
+    }
+  ]
+}
+```
+
+**`TabControl` attribute** — use `actionMode: "Select"` (not `"Input"`) in the test step value:
+
+```json
+{
+  "id": "<attrId>",
+  "name": "Select tab",
+  "businessType": "TabControl",
+  "defaultActionMode": "Select",
+  "valueRange": ["Tab1Name", "Tab2Name"],
+  "parameters": [
+    { "name": "BusinessAssociation", "value": "Descendants",    "type": "Configuration" },
+    { "name": "Engine",              "value": "SapEngine",      "type": "Configuration" },
+    { "name": "RelativeId",          "value": "/usr/tabsTS_TAB","type": "TechnicalId"   }
+  ]
+}
+```
+
+In the test step value set `"actionMode": "Select"` and `"value"` = one of the tab names from `valueRange`.
+
+### ControlFlowItemV2 — conditional popup handling
+
+SAP sometimes shows optional popup dialogs. Model them with an `If` control flow item:
+
+```json
+{
+  "$type": "ControlFlowItemV2",
+  "statementTypeV2": "If",
+  "condition": {
+    "items": [
+      {
+        "$type": "TestStepV2",
+        "testStepValues": [
+          {
+            "name": "<FieldName>",
+            "value": "<ExpectedValue>",
+            "actionMode": "Verify",
+            "actionProperty": "Visible",
+            "dataType": "String",
+            "operator": "Equals",
+            "moduleAttributeReference": { ... }
+          }
+        ],
+        "moduleReference": { ... }
+      }
+    ]
+  },
+  "conditionPassed": {
+    "items": [
+      { "$type": "TestStepV2", "testStepValues": [ ... ] }
+    ]
+  },
+  "id": "<ULID>",
+  "name": "If initial popup is visible",
+  "disabled": false
+}
+```
+
+### SAP module naming convention
+
+`TCODE | Screen Name` or `TCODE | Screen Name | Sub-screen`
+
+Examples from the live tenant:
+- `FBCJ | Cash Journal | Tabs`
+- `FBCJ | Cash Journal: Initial Data pop up`
+- `AS01 | Create Asset | Initial screen`
+- `ABZON | Enter Asset Transaction: Acquis. w/Autom. Offsetting Entry`
+- `ME21N | Create Purchase Order`
+- `MIGO | Goods Receipt Purchase Order`
+- `MIRO | Enter Incoming Invoice: Company Code BY01`
+
+### Finding RelativeId values for a new SAP screen
+
+You cannot use Playwright for SAP GUI (it is a thick client, not a browser). To find `RelativeId` values:
+
+1. **Copy from a similar existing module** — `modules get <existingModuleId> --json` and look for the same field names from a similar T-code or screen.
+2. **SAP technical info**: in SAP GUI, click a field and press `F1` → Technical Information → "Screen field" (e.g. `ANLA-ANLKL`). The `RelativeId` for a text field is `/usr/ctxt<FIELDNAME>`.
+3. **Read existing test case steps**: `cases steps <existingCaseId> --json` — every step value carries `moduleAttributeReference.metadata` which sometimes embeds the RelativeId from the scanned module.
+
+### Full SAP GUI test creation workflow
+
+```bash
+# 1. Check if modules for the target T-code screens already exist
+python tosca_cli.py inventory search "<TCODE>" --type Module --json
+
+# 2a. If module exists — get it and confirm attribute IDs
+python tosca_cli.py modules get <moduleId> --json
+
+# 2b. If no module — create shell, then PUT full body
+python tosca_cli.py modules create --name "<TCODE> | <ScreenName>" --iface Gui --json
+# → write module body JSON (businessType: Window, SapEngine attributes)
+python tosca_cli.py modules update <moduleId> --json-file /tmp/<screen>_module.json
+python tosca_cli.py modules get <moduleId> --json   # verify attributes saved
+
+# 3. Create test case shell
+python tosca_cli.py cases create --name "<description>" --state Planned --json
+# → save the case ID
+
+# 4. Write test case JSON:
+#    - testConfigurationParameters: Username (String) + Password (Password type)
+#    - testCaseItems[0]: TestStepFolderReferenceV2 → Precondition block b0e929fa + 5 param values
+#    - testCaseItems[1..]: TestStepFolderV2 Process/Verification/Teardown folders
+#      Each Process sub-folder: T-code step (35fcfe84) + screen interaction steps
+
+# 5. PUT the full case body
+python tosca_cli.py cases update <caseId> --json-file /tmp/<case>.json
+
+# 6. Verify
+python tosca_cli.py cases steps <caseId>
+
+# 7. Move to the right folder
+python tosca_cli.py inventory move testCase <caseId> --folder-id <folderId>
+```
+
+---
 
 ## Approach
 

@@ -1,7 +1,7 @@
 ---
 description: "Use when working with Tricentis TOSCA Cloud: creating test cases, modules, playlists, folders, running tests, importing/exporting TSU files, searching inventory, working with reuseable test step blocks, or any TOSCA CLI automation task."
 name: "TOSCA Automation"
-tools: [execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, execute/runNotebookCell, execute/testFailure, read/terminalSelection, read/terminalLastCommand, read/getNotebookSummary, read/problems, read/readFile, read/readNotebookCellOutput, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/searchResults, search/textSearch, search/usages, playwright_mcp/browser_click, playwright_mcp/browser_close, playwright_mcp/browser_console_messages, playwright_mcp/browser_drag, playwright_mcp/browser_evaluate, playwright_mcp/browser_file_upload, playwright_mcp/browser_fill_form, playwright_mcp/browser_handle_dialog, playwright_mcp/browser_hover, playwright_mcp/browser_install, playwright_mcp/browser_navigate, playwright_mcp/browser_navigate_back, playwright_mcp/browser_network_requests, playwright_mcp/browser_press_key, playwright_mcp/browser_resize, playwright_mcp/browser_run_code, playwright_mcp/browser_select_option, playwright_mcp/browser_snapshot, playwright_mcp/browser_tabs, playwright_mcp/browser_take_screenshot, playwright_mcp/browser_type, playwright_mcp/browser_wait_for, todo]
+tools: [vscode/extensions, vscode/askQuestions, vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/runCommand, vscode/vscodeAPI, execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, execute/runNotebookCell, execute/testFailure, read/terminalSelection, read/terminalLastCommand, read/getNotebookSummary, read/problems, read/readFile, read/readNotebookCellOutput, agent/runSubagent, browser/openBrowserPage, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/searchResults, search/textSearch, search/usages, web/fetch, web/githubRepo, playwright_mcp/browser_click, playwright_mcp/browser_close, playwright_mcp/browser_console_messages, playwright_mcp/browser_drag, playwright_mcp/browser_evaluate, playwright_mcp/browser_file_upload, playwright_mcp/browser_fill_form, playwright_mcp/browser_handle_dialog, playwright_mcp/browser_hover, playwright_mcp/browser_install, playwright_mcp/browser_navigate, playwright_mcp/browser_navigate_back, playwright_mcp/browser_network_requests, playwright_mcp/browser_press_key, playwright_mcp/browser_resize, playwright_mcp/browser_run_code, playwright_mcp/browser_select_option, playwright_mcp/browser_snapshot, playwright_mcp/browser_tabs, playwright_mcp/browser_take_screenshot, playwright_mcp/browser_type, playwright_mcp/browser_wait_for, todo]
 argument-hint: "Describe the TOSCA task (e.g. 'create a test case for login flow', 'run smoke playlist and show failures', 'move all Web test cases into the Regression folder')"
 ---
 
@@ -175,6 +175,9 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | `modules update` returns empty `{}` | A 200/204 with empty body is normal — verify with `modules get <id> --json` afterwards to confirm attributes were saved. |
 | Html module root-level `Engine` param is required | Manually created Html modules **must** have `{"name": "Engine", "value": "Html", "type": "Configuration"}` in the **root-level `parameters` array** (not just per-attribute). Without it TOSCA throws `XModules and XModuleAttributes have to provide the configuration param "Engine"` at runtime. Scanned modules have this automatically; manual ones do not — add it via `modules update`. |
 | Web module attributes need full parameter set | Each attribute in an Html module requires: `BusinessAssociation=Descendants`, `Engine=Html`, `Tag`, `InnerText` (and optionally `HREF`/`ClassName`) — omitting any TechnicalId may cause TOSCA to fail to locate the element. |
+| `"More than one matching tab"` at runtime | A leftover browser tab from a previous test run causes TOSCA to fail finding the right tab. Fix: add a `CloseBrowser` step with `Title="*"` as the **very first step inside the Precondition folder** — before `OpenUrl`. This closes any open browser regardless of title before the new session starts. |
+| `"Could not find Link '...'"` when page has duplicate elements | Modern pages often render the same nav link in multiple places (mobile hamburger menu, desktop nav, sticky header, dropdown). `Tag+InnerText+HREF` alone will match all copies and TOSCA fails. Fix: use `browser_evaluate` to count all matching elements and find a CSS class unique to the target copy (e.g. `top-navigation__item-link` for the main desktop nav). Add `ClassName` as an additional `TechnicalId` parameter to the attribute. |
+| Always verify element uniqueness before saving a module | After choosing locator values (`Tag`, `InnerText`, `HREF`), run `document.querySelectorAll('a[href="/path"]').length` via `browser_evaluate` to confirm exactly one match. If count > 1, add `ClassName` to discriminate. Never commit a module that matches more than one element — TOSCA will error at runtime, not at save time. |
 | OpenUrl needs 3 params, not just Url | Always include `UseActiveTab=False` and `ForcePageSwitch=True` alongside `Url` in an OpenUrl step — see Web Automation section for full IDs. Omitting them can cause browser tab/window handling issues. |
 | `actionMode: Verify` + `actionProperty` | Use `"actionMode": "Verify"` with `actionProperty: "Visible"` or `actionProperty: "InnerText"` to assert element state. Empty `actionProperty` = plain interaction. |
 | Password fields are never plaintext | In TestStepValues use `"dataType": "Password"` + `"password": {"id": "..."}` with empty `value`. In config params use same pattern. Reference via `{CP[Password]}`. |
@@ -218,6 +221,15 @@ From the snapshot, extract for each element you need to interact with:
 - **HREF** — for `<a>` tags (secondary identifier, combine with InnerText)
 - **ClassName** — CSS class for elements without unique text (e.g. icon buttons)
 - **Tag** — HTML tag (`A`, `BUTTON`, `INPUT`, etc.)
+
+**After mapping elements — always check uniqueness before writing the module:**
+```
+6. browser_evaluate  document.querySelectorAll('a[href="/path"]').length
+   → must return 1; if > 1, find a discriminating ClassName
+7. browser_evaluate  JSON.stringify(Array.from(document.querySelectorAll('a[href="/path"]')).map(function(el){return {cls:el.className}}))
+   → pick the class that appears on only the correct element (e.g. desktop nav vs mobile hamburger)
+```
+Many sites render nav links twice (mobile + desktop). TOSCA will fail at runtime if multiple elements match — it does **not** warn during module save.
 
 ### Module structure for Html elements
 
@@ -352,11 +364,14 @@ Every web test case should start with an `OpenUrl` step in the **Precondition** 
 All scanned login-style tests follow this 4-folder pattern — use it as the template for any full Html test:
 
 ```
-Precondition   — OpenUrl (with UseActiveTab + ForcePageSwitch) + any buffer/data setup steps
+Precondition   — CloseBrowser Title="*"  ← FIRST: kill any leftover browser from previous run
+               — OpenUrl (with UseActiveTab + ForcePageSwitch) + any buffer/data setup steps
 Process        — User actions: click links, fill text boxes, click buttons
 Verification   — Verify steps (actionMode: Verify) checking visible elements or InnerText
 Teardown       — CloseBrowser + optional Wait
 ```
+
+> **Why CloseBrowser at the start?** If a previous test left a browser tab open, TOSCA throws `"More than one matching tab"` when it tries to use the tab opened by `OpenUrl`. Starting Precondition with `CloseBrowser Title="*"` (wildcard matches any title) guarantees a clean slate before each run.
 
 ### Verify steps — actionMode and actionProperty
 

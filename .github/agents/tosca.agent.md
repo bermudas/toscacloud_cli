@@ -173,6 +173,7 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | Entity ID truncation in table output | The table view truncates IDs with `…`. Always use `--json` to get full entity IDs before passing them to other commands. |
 | Html standard module IDs (framework) | `Html.OpenUrl` module id: `9f8d14b3-7651-4add-bcfe-341a996662cc`, Url attr ref: `39e342b2-960b-2251-d1b9-5b340c12fa19`. These are framework-provided — they don't appear in `inventory search --type Module` but work in test step values. |
 | `modules update` returns empty `{}` | A 200/204 with empty body is normal — verify with `modules get <id> --json` afterwards to confirm attributes were saved. |
+| Html module root-level `Engine` param is required | Manually created Html modules **must** have `{"name": "Engine", "value": "Html", "type": "Configuration"}` in the **root-level `parameters` array** (not just per-attribute). Without it TOSCA throws `XModules and XModuleAttributes have to provide the configuration param "Engine"` at runtime. Scanned modules have this automatically; manual ones do not — add it via `modules update`. |
 | Web module attributes need full parameter set | Each attribute in an Html module requires: `BusinessAssociation=Descendants`, `Engine=Html`, `Tag`, `InnerText` (and optionally `HREF`/`ClassName`) — omitting any TechnicalId may cause TOSCA to fail to locate the element. |
 | OpenUrl needs 3 params, not just Url | Always include `UseActiveTab=False` and `ForcePageSwitch=True` alongside `Url` in an OpenUrl step — see Web Automation section for full IDs. Omitting them can cause browser tab/window handling issues. |
 | `actionMode: Verify` + `actionProperty` | Use `"actionMode": "Verify"` with `actionProperty: "Visible"` or `actionProperty: "InnerText"` to assert element state. Empty `actionProperty` = plain interaction. |
@@ -220,7 +221,9 @@ From the snapshot, extract for each element you need to interact with:
 
 ### Module structure for Html elements
 
-Each interactable element on a page becomes one **attribute** on a `HtmlDocument` module. The attribute's `parameters` array holds the technical identifiers TOSCA uses to locate the element:
+Each interactable element on a page becomes one **attribute** on a `HtmlDocument` module. The attribute's `parameters` array holds the technical identifiers TOSCA uses to locate the element.
+
+**Critical**: the module's **root-level `parameters` array** must also contain `Engine: Html` — TOSCA uses this to route execution to the right engine. Without it, execution fails with `XModules and XModuleAttributes have to provide the configuration param "Engine"`.
 
 ```json
 {
@@ -229,6 +232,9 @@ Each interactable element on a page becomes one **attribute** on a `HtmlDocument
   "name": "<AppName> | <PageName>",
   "businessType": "HtmlDocument",
   "interfaceType": "Gui",
+  "parameters": [
+    {"id": "<ULID>", "name": "Engine", "value": "Html", "type": "Configuration"}
+  ],
   "attributes": [
     {
       "id": "<fresh-ULID-or-fixed-id>",

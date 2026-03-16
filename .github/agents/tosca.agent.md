@@ -161,6 +161,12 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | Html standard module IDs (framework) | `Html.OpenUrl` module id: `9f8d14b3-7651-4add-bcfe-341a996662cc`, Url attr ref: `39e342b2-960b-2251-d1b9-5b340c12fa19`. These are framework-provided — they don't appear in `inventory search --type Module` but work in test step values. |
 | `modules update` returns empty `{}` | A 200/204 with empty body is normal — verify with `modules get <id> --json` afterwards to confirm attributes were saved. |
 | Web module attributes need full parameter set | Each attribute in an Html module requires: `BusinessAssociation=Descendants`, `Engine=Html`, `Tag`, `InnerText` (and optionally `HREF`/`ClassName`) — omitting any TechnicalId may cause TOSCA to fail to locate the element. |
+| OpenUrl needs 3 params, not just Url | Always include `UseActiveTab=False` and `ForcePageSwitch=True` alongside `Url` in an OpenUrl step — see Web Automation section for full IDs. Omitting them can cause browser tab/window handling issues. |
+| `actionMode: Verify` + `actionProperty` | Use `"actionMode": "Verify"` with `actionProperty: "Visible"` or `actionProperty: "InnerText"` to assert element state. Empty `actionProperty` = plain interaction. |
+| Password fields are never plaintext | In TestStepValues use `"dataType": "Password"` + `"password": {"id": "..."}` with empty `value`. In config params use same pattern. Reference via `{CP[Password]}`. |
+| `{CP[ParamName]}` syntax for config params | Test step values can reference test configuration parameters using `{CP[ParameterName]}` — used for Username/Password and other per-execution overrides. |
+| `Container` businessType for error message divs | To verify text inside a `<div>`/`<span>` error container, use `businessType: "Container"` on the module attribute with `actionMode: "Verify"` + `actionProperty: "InnerText"`. |
+| Standard non-Html framework modules | `CloseBrowser` (`3019e887-48ca-4a7e-8759-79e7762c6152`, Title attr: `39e342b2-958e-3e2f-7c85-29871c23f1dc`); `Wait` Timing (`80b7982e-0e10-4bc0-bdf3-6bc04503fd63`, Duration attr: `39e342b2-958e-ba1f-bb58-702e193d6016`, ms); `Buffer` (`8415c10d-ab41-44a7e-949a-602f4dddd2d2`, Buffername attr: `39e342b2-958e-0a6b-cbfd-5fdd372ca255`). |
 
 ## Undocumented APIs Available
 
@@ -239,19 +245,34 @@ Each interactable element on a page becomes one **attribute** on a `HtmlDocument
 | `<select>` | `Combobox` | `["{Select}"]` |
 | page / document root | `HtmlDocument` | — (module-level businessType only) |
 
-### Standard Html framework modules (always available, no inventory entry)
+### Standard framework modules (always available, no inventory entry)
 
-These are provided by the Html engine package and **do not appear in `inventory search --type Module`**:
+These are provided by framework engine packages and **do not appear in `inventory search --type Module`**. Use their IDs directly in `moduleReference.id` / `moduleAttributeReference.id` without creating a module.
 
-| Module name | Module ID | Key attribute ref ID | Purpose |
-|-------------|-----------|---------------------|--------|
-| `OpenUrl` | `9f8d14b3-7651-4add-bcfe-341a996662cc` | Url: `39e342b2-960b-2251-d1b9-5b340c12fa19` | Navigate to a URL |
+**Html engine:**
 
-Use these IDs directly in `moduleReference.id` and `moduleAttributeReference.id` without creating a module.
+| Step name | Module ID | Attribute | Attr ref ID | Notes |
+|-----------|-----------|-----------|-------------|-------|
+| `OpenUrl` | `9f8d14b3-7651-4add-bcfe-341a996662cc` | `Url` | `39e342b2-960b-2251-d1b9-5b340c12fa19` | Navigate to URL |
+| `OpenUrl` | same | `UseActiveTab` | `39ef3b0d-1ee2-a137-d5d3-976be1b8c766` | Always set `"False"` |
+| `OpenUrl` | same | `ForcePageSwitch` | `deaad6b0-32d2-4c60-a682-40e30540e3d9` | Always set `"True"` |
+| `CloseBrowser` | `3019e887-48ca-4a7e-8759-79e7762c6152` | `Title` | `39e342b2-958e-3e2f-7c85-29871c23f1dc` | Close browser; value = page title glob e.g. `"Demo Web Shop*"` |
 
-### Step 1 — always OpenUrl
+**BufferOperations engine:**
 
-Every web test case should start with an `OpenUrl` step in the **Precondition** folder:
+| Step name | Module ID | Attribute | Attr ref ID | Notes |
+|-----------|-----------|-----------|-------------|-------|
+| `BUFFER: <name>` | `8415c10d-ab41-44a7e-949a-602f4dddd2d2` | `<Buffername>` | `39e342b2-958e-0a6b-cbfd-5fdd372ca255` | Store a value in a buffer; set `explicitName` on the TestStepValue to label it |
+
+**Timing engine:**
+
+| Step name | Module ID | Attribute | Attr ref ID | Notes |
+|-----------|-----------|-----------|-------------|-------|
+| `Wait` | `80b7982e-0e10-4bc0-bdf3-6bc04503fd63` | `Duration` | `39e342b2-958e-ba1f-bb58-702e193d6016` | Sleep; value in milliseconds (`"3000"` = 3 s); `dataType: Numeric` |
+
+### Step 1 — always OpenUrl (with all 3 params)
+
+Every web test case should start with an `OpenUrl` step in the **Precondition** folder. Always include all three params — `UseActiveTab` and `ForcePageSwitch` control tab/window behaviour and are required for correct browser execution:
 
 ```json
 {
@@ -262,20 +283,113 @@ Every web test case should start with an `OpenUrl` step in the **Precondition** 
     "packageReference": {"id": "Html", "type": "Standard"},
     "metadata": {"isRescanEnabled": false, "engine": "Framework"}
   },
-  "testStepValues": [{
-    "name": "Url",
-    "value": "https://example.com",
-    "actionMode": "Input",
-    "dataType": "String",
-    "operator": "Equals",
-    "moduleAttributeReference": {
-      "id": "39e342b2-960b-2251-d1b9-5b340c12fa19",
-      "moduleId": "9f8d14b3-7651-4add-bcfe-341a996662cc",
-      "packageReference": {"id": "Html", "type": "Standard"}
+  "testStepValues": [
+    {
+      "name": "Url",
+      "value": "https://example.com",
+      "actionMode": "Input", "dataType": "String", "operator": "Equals",
+      "moduleAttributeReference": {
+        "id": "39e342b2-960b-2251-d1b9-5b340c12fa19",
+        "moduleId": "9f8d14b3-7651-4add-bcfe-341a996662cc",
+        "packageReference": {"id": "Html", "type": "Standard"}
+      }
+    },
+    {
+      "name": "UseActiveTab",
+      "value": "False",
+      "actionMode": "Input", "dataType": "String", "operator": "Equals",
+      "moduleAttributeReference": {
+        "id": "39ef3b0d-1ee2-a137-d5d3-976be1b8c766",
+        "moduleId": "9f8d14b3-7651-4add-bcfe-341a996662cc",
+        "packageReference": {"id": "Html", "type": "Standard"},
+        "metadata": {"valueRange": ["True", "False"]}
+      }
+    },
+    {
+      "name": "ForcePageSwitch",
+      "value": "True",
+      "actionMode": "Input", "dataType": "String", "operator": "Equals",
+      "moduleAttributeReference": {
+        "id": "deaad6b0-32d2-4c60-a682-40e30540e3d9",
+        "moduleId": "9f8d14b3-7651-4add-bcfe-341a996662cc",
+        "packageReference": {"id": "Html", "type": "Standard"},
+        "metadata": {"valueRange": ["True", "False"]}
+      }
     }
-  }]
+  ]
 }
 ```
+
+### Standard 4-folder test case structure
+
+All scanned login-style tests follow this 4-folder pattern — use it as the template for any full Html test:
+
+```
+Precondition   — OpenUrl (with UseActiveTab + ForcePageSwitch) + any buffer/data setup steps
+Process        — User actions: click links, fill text boxes, click buttons
+Verification   — Verify steps (actionMode: Verify) checking visible elements or InnerText
+Teardown       — CloseBrowser + optional Wait
+```
+
+### Verify steps — actionMode and actionProperty
+
+Use `"actionMode": "Verify"` on a TestStepValue to assert something about an element:
+
+| `actionProperty` | What it checks | Example value |
+|------------------|---------------|---------------|
+| `"Visible"` | Element is visible on page | `"True"` |
+| `"InnerText"` | Element's exact inner text | `"Please enter a valid email address."` |
+| `""` (empty) | Default action — interact, not assert | — |
+
+```json
+{
+  "name": "Error message",
+  "value": "Please enter a valid email address.",
+  "actionMode": "Verify",
+  "actionProperty": "InnerText",
+  "operator": "Equals",
+  "dataType": "String"
+}
+```
+
+A `Container` businessType attribute is used on the login-form module to verify the error message div:
+- businessType: `Container` — for verifying text content of a `<div>` / `<span>` / `<p>` container element
+
+### Password fields in test steps and config params
+
+Passwords are never stored as plaintext. There are two ways they appear:
+
+**1. In a `testStepValue`** (input to a TextBox attribute):
+```json
+{
+  "name": "Password:",
+  "value": "",
+  "password": {"id": "<encrypted-password-id>"},
+  "actionMode": "Input",
+  "dataType": "Password",
+  "operator": "Equals"
+}
+```
+Set `dataType: "Password"` and provide `"password": {"id": "..."}`. The `value` field is empty.
+
+**2. As a test configuration parameter:**
+```json
+{
+  "name": "Password",
+  "dataType": "Password",
+  "password": {"id": "<encrypted-password-id>"}
+}
+```
+Reference it in step values as `{CP[Password]}`.
+
+### Config parameter references (`{CP[...]}`)
+
+Test step values can reference test configuration parameters using `{CP[Name]}` syntax:
+```json
+{"name": "User",     "value": "{CP[Username]}"}
+{"name": "Password", "value": "{CP[Password]}"}
+```
+This is how SAP GUI and parameterised web tests pass credentials without hardcoding them in steps.
 
 ### Full web test creation workflow
 

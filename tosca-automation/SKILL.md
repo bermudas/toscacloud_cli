@@ -57,15 +57,23 @@ python tosca_cli.py modules update <moduleId> --json-file body.json
 python tosca_cli.py blocks get <blockId>
 python tosca_cli.py blocks add-param <blockId> --name <name> [--value-range '1,2,3']
 python tosca_cli.py blocks set-value-range <blockId> <paramName> --values '1,2,3,4'
+python tosca_cli.py blocks delete <blockId> --force
+
+# Test case patch (partial update)
+python tosca_cli.py cases patch <caseId> --operations '[{"op":"replace","path":"/workState","value":"Completed"}]'
 
 # Playlists
 python tosca_cli.py playlists list
+python tosca_cli.py playlists list-runs
 python tosca_cli.py playlists run <id> --wait
 python tosca_cli.py playlists results <runId>
 
 # Folders
 python tosca_cli.py inventory move testCase <entityId> --folder-id <folderEntityId>
 python tosca_cli.py inventory create-folder --name "..." [--parent-id "..."]
+python tosca_cli.py inventory rename-folder <folderId> --name "..."
+python tosca_cli.py inventory delete-folder <folderId> [--delete-children] --force
+python tosca_cli.py inventory folder-ancestors <folderId>
 python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 ```
 
@@ -86,6 +94,16 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | SAP standard modules | Not in inventory. `SAP Logon`, `SAP Login`, `T-code` — use IDs directly from [SAP guide](references/sap-automation.md) |
 | TSU export field | `reusableTestStepBlockIds` (no double-e) |
 | `version` in PUT body | Omit — rejected by both case and block PUT endpoints |
+| Test case PUT requires `id` in body | The full PUT body must include `"id": "<caseId>"` — API rejects bodies without it |
+| New case not in inventory immediately | After `cases create`, wait 3–10 s before searching — CLI retries automatically |
+| Placing a case after create/clone | Always run `inventory move testCase <newId> --folder-id <folderId>` — creation alone doesn't place it |
+| Finding a folder's entity ID | Use `inventory folder-tree --folder-ids "<parentId>"` or read the UUID from the portal URL |
+| `inventory search --folder-id` | Filters client-side by matching the `folderKey` suffix — pass `--folder-ids` with parent IDs |
+| `modules update` returns `{}` | A 200/204 with empty body is normal — verify with `modules get <id> --json` afterwards |
+| Block params need `id` | Every `businessParameters` entry needs a ULID `id` — always use `blocks add-param` which generates one |
+| `referencedParameterId` | Each parameter value entry must match a `businessParameter.id` from the block — get IDs via `blocks get <blockId> --json` |
+| `{CP[ParamName]}` syntax | Reference test config params in step values: `{CP[Username]}`, `{CP[Password]}` |
+| ProcessOperations `subValues` | The `Arguments` step uses `actionMode: "Select"` with each CLI arg as a separate item in `subValues[]` — multiple args in one `value` string won't work |
 
 ## ULID generation
 
@@ -106,3 +124,4 @@ Items use `$type`:
 
 - Read [Web Automation (Html engine)](references/web-automation.md) when creating or updating Html engine modules, building web test cases, or using Playwright to discover element locators and class names.
 - Read [SAP GUI Automation (SapEngine)](references/sap-automation.md) when creating or updating SAP GUI modules, assembling SAP test cases, or working with T-codes, RelativeId locators, or the Precondition reusable block.
+- Read [Reusable Blocks](references/blocks.md) when working with reusable test step blocks — extending block parameters, wiring block references into test cases, or debugging `parameterLayerId` / `referencedParameterId` issues.

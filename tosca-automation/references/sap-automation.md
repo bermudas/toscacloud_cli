@@ -133,6 +133,31 @@ Teardown       — (optional) Wait / close
 | Tab strip | `/usr/tabs` | `/usr/tabsTS_BUKRS` |
 | Checkbox | `/usr/chk` | `/usr/chkFLAG-1` |
 
+## ControlGroup attribute (toolbar / button group)
+
+When several buttons belong to one toolbar region, model them as a `ControlGroup` attribute with nested child `Button` attributes:
+
+```json
+{
+  "id": "<groupId>",
+  "name": "Toolbar",
+  "businessType": "ControlGroup",
+  "interfaceType": "Gui",
+  "attributes": [
+    {
+      "id": "<btnId>",
+      "name": "Today",
+      "businessType": "Button",
+      "valueRange": ["{Click}"],
+      "parameters": [
+        {"name": "Engine",     "value": "SapEngine",       "type": "Configuration"},
+        {"name": "RelativeId", "value": "/usr/btnFB_TODAY", "type": "TechnicalId"}
+      ]
+    }
+  ]
+}
+```
+
 ## TabControl attribute
 
 Use `actionMode: "Select"` in the step value (not `"Input"`):

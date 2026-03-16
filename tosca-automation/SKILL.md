@@ -1,6 +1,6 @@
 ---
 name: tosca-automation
-description: "Automate Tricentis TOSCA Cloud via the tosca_cli.py CLI. Use when creating test cases, web (Html engine) or SAP GUI (SapEngine) modules, playlists, or inventory folders; running tests; searching inventory; working with reusable test step blocks; importing/exporting TSU files; or any TOSCA Cloud REST API task. Covers the full lifecycle: discover → build → place → verify."
+description: "Use this skill for any Tricentis TOSCA Cloud task — even if the user doesn't mention TOSCA, CLI, or test automation explicitly. Triggers on: creating or updating test cases, web (Html engine) or SAP GUI (SapEngine) modules, playlists, or inventory folders; running or checking tests; searching inventory; working with reusable test step blocks; importing/exporting TSU files; or any TOSCA Cloud REST API operation. Covers the full lifecycle: discover → build → place → verify."
 license: MIT
 compatibility: "Python 3.10+. Packages: httpx typer[all] rich python-dotenv. Requires .env with TOSCA_TENANT_URL and TOSCA_SPACE_ID. Run from the project root: python tosca_cli.py <command>"
 metadata:
@@ -104,5 +104,5 @@ Items use `$type`:
 
 ## Detailed how-to guides
 
-- [Web Automation (Html engine)](references/web-automation.md) — Playwright discovery, module structure, OpenUrl params, 4-folder structure, Verify steps, standard module IDs
-- [SAP GUI Automation (SapEngine)](references/sap-automation.md) — standard SAP module IDs, Precondition block, RelativeId patterns, module structure, ControlFlowItemV2
+- Read [Web Automation (Html engine)](references/web-automation.md) when creating or updating Html engine modules, building web test cases, or using Playwright to discover element locators and class names.
+- Read [SAP GUI Automation (SapEngine)](references/sap-automation.md) when creating or updating SAP GUI modules, assembling SAP test cases, or working with T-codes, RelativeId locators, or the Precondition reusable block.

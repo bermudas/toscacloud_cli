@@ -9,6 +9,19 @@ metadata:
   repository: https://github.com/bermudas/toscacloud_cli
 ---
 
+## When to use this skill
+
+Use this skill for any task involving the Tricentis TOSCA Cloud REST API or the `tosca_cli.py` CLI:
+
+- **Test cases** — create, update, clone, patch work state, export/import TSU
+- **Modules** — create or update Html (web) or SAP GUI modules with locator attributes
+- **Reusable blocks** — extend parameters, wire block references into test cases
+- **Inventory** — search, move, organize into folders
+- **Playlists** — list, run, check results
+- **Web automation** (Html engine) — use Playwright to discover element locators, build modules, assemble 4-folder test cases
+- **SAP GUI automation** (SapEngine) — create screen modules with `RelativeId` locators, wire the Precondition block
+- **Any TOSCA Cloud REST API operation** not listed above
+
 ## Core principle — always discover before acting
 
 The MBT API has no list endpoint. Use Inventory as the discovery layer:

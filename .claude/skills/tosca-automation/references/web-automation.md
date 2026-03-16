@@ -81,14 +81,17 @@
 ## 4-folder test case structure
 
 ```
-Precondition   — CloseBrowser Title="*"  ← ALWAYS FIRST: clears leftover browser sessions
+Precondition   — CloseBrowser Title="*"  ← FIRST: clears leftover browser sessions
                — OpenUrl (Url + UseActiveTab=False + ForcePageSwitch=True)
+               — Wait Duration=5000      ← FOR SPAs: wait for page to finish rendering
 Process        — User actions (click links, fill inputs, click buttons)
 Verification   — Verify steps (actionMode: Verify + actionProperty)
 Teardown       — CloseBrowser + optional Wait
 ```
 
 > **Why CloseBrowser first?** A leftover browser tab from a previous run causes _"More than one matching tab"_. Starting with `CloseBrowser Title="*"` (wildcard) guarantees a clean slate.
+
+> **Why Wait after OpenUrl?** Single-page apps (React, Angular, etc.) continue rendering after the URL changes. Without an explicit wait, TOSCA attempts to click elements before they exist and fails with _"Element not found"_. Use `Timing.Wait Duration=5000` at the end of Precondition for any SPA — module ID `80b7982e-0e10-4bc0-bdf3-6bc04503fd63`, attr ref `39e342b2-958e-ba1f-bb58-702e193d6016`, value `"5000"`, `dataType: Numeric`.
 
 ## OpenUrl step template (all 3 params required)
 

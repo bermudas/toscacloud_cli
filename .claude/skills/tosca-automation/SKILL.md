@@ -102,6 +102,8 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | Html module root `Engine` param | Manually created Html modules must have `{"name":"Engine","value":"Html","type":"Configuration"}` in the root-level `parameters` array. Without it: _XModules and XModuleAttributes have to provide the configuration param "Engine"_ |
 | Duplicate page elements | Modern pages render the same nav link in mobile + desktop. `Tag+InnerText+HREF` alone matches all copies. Use `browser_evaluate` to count matches; add `ClassName` to discriminate. |
 | Leftover browser tab | Start Precondition with `CloseBrowser Title="*"` before `OpenUrl` to avoid _"More than one matching tab"_ |
+| SPA page-load timing | After `OpenUrl`, add `Timing.Wait Duration=5000` at the end of Precondition for SPAs (React/Angular/etc) — without it TOSCA fails to find the first element with _"Element not found"_ |
+| MBT PATCH deep paths silently no-op | `cases patch` with paths like `/testCaseItems/1/items/2/…` returns 204 but makes no change. Use full `cases update --json-file` (PUT) for step-level edits — fetch JSON, mutate in Python, remove `version`, PUT. |
 | MBT PATCH ops | Lowercase: `replace`, `add`, `remove` |
 | Inventory v3 PATCH body | Wrapper: `{"operations": [{"op": "Replace", ...}]}` — PascalCase op |
 | Inventory search filter | Despite swagger, only lowercase works: `contains`, `and` |

@@ -3,6 +3,7 @@ name: tosca-automation
 description: "Use this skill for any Tricentis TOSCA Cloud task — even if the user doesn't mention TOSCA, CLI, or test automation explicitly. Triggers on: creating or updating test cases, web (Html engine) or SAP GUI (SapEngine) modules, playlists, or inventory folders; running or checking tests; searching inventory; working with reusable test step blocks; importing/exporting TSU files; or any TOSCA Cloud REST API operation. Covers the full lifecycle: discover → build → place → verify."
 license: MIT
 compatibility: "Python 3.10+. Packages: httpx typer[all] rich python-dotenv. Requires .env with TOSCA_TENANT_URL and TOSCA_SPACE_ID. Run from the project root: python tosca_cli.py <command>"
+argument-hint: "Describe the TOSCA task (e.g. 'create a test case for login flow', 'run smoke playlist and show failures', 'move all Web test cases into the Regression folder')"
 metadata:
   author: bermudas
   version: "1.0"

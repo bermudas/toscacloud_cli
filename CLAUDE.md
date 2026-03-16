@@ -73,10 +73,10 @@ python tosca_cli.py playlists list
 | `README.md` | User-facing docs |
 | `CLAUDE.md` | This file — project guide for Claude Code |
 | `.github/agents/tosca.agent.md` | TOSCA Automation agent instructions (full reference: decision tree, CLI commands, caveats, Web + SAP how-to) |
-| `tosca-automation/SKILL.md` | Agent Skills package (agentskills.io spec) — condensed skill with links to references/ |
-| `tosca-automation/references/web-automation.md` | Html engine how-to (module structure, standard module IDs, Playwright discovery, 4-folder pattern) |
-| `tosca-automation/references/sap-automation.md` | SapEngine how-to (standard module IDs, Precondition block, RelativeId patterns, ControlFlowItemV2) |
-| `tosca-automation/references/blocks.md` | Reusable blocks deep dive (block↔case wiring, parameterLayerId, ULID rules, extend workflow) |
+| `.claude/skills/tosca-automation/SKILL.md` | Agent Skills package (agentskills.io spec) — project skill, auto-discovered by Claude Code |
+| `.claude/skills/tosca-automation/references/web-automation.md` | Html engine how-to (module structure, standard module IDs, Playwright discovery, 4-folder pattern) |
+| `.claude/skills/tosca-automation/references/sap-automation.md` | SapEngine how-to (standard module IDs, Precondition block, RelativeId patterns, ControlFlowItemV2) |
+| `.claude/skills/tosca-automation/references/blocks.md` | Reusable blocks deep dive (block↔case wiring, parameterLayerId, ULID rules, extend workflow) |
 
 ## Dependencies (requirements.txt)
 

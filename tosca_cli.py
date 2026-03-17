@@ -1868,6 +1868,62 @@ def playlists_update(
     console.print(f"[green]\u2713 Playlist {playlist_id} updated.[/green]")
 
 
+@playlists_app.command("set-characteristic")
+def playlists_set_characteristic(
+    playlist_id: str = typer.Argument(..., help="Playlist Id"),
+    char_name:   str = typer.Option(..., "--name", "-n", help="Characteristic name (e.g. AgentIdentifier)"),
+    char_value:  str = typer.Option(..., "--value", "-v", help="Characteristic value (e.g. Tosca-Team-Agent)"),
+    as_json:     bool = typer.Option(False, "--json", help="Raw JSON output"),
+):
+    """Add or replace a characteristic on a playlist (GET → merge → PUT)."""
+    client = ToscaClient()
+    try:
+        data = client.get_playlist(playlist_id)
+    except ToscaError as e:
+        _exit_err(str(e))
+
+    # Merge the characteristic (upsert by name)
+    chars: list = data.get("characteristics") or []
+    chars = [c for c in chars if c.get("name") != char_name]
+    chars.append({"name": char_name, "value": char_value})
+
+    # Transform GET items (TestCaseV1) → PUT items (InputTestCaseV1)
+    raw_items = data.get("items") or []
+    input_items = []
+    for item in raw_items:
+        if item.get("$type") in ("TestCaseV1", "InputTestCaseV1"):
+            entry: dict = {
+                "$type": "InputTestCaseV1",
+                "sourceId": item.get("sourceId", ""),
+                "disabled": item.get("disabled", False),
+            }
+            if item.get("parameters"):
+                entry["parameters"] = item["parameters"]
+            if item.get("characteristics"):
+                entry["characteristics"] = item["characteristics"]
+            input_items.append(entry)
+
+    try:
+        client.update_playlist(
+            playlist_id,
+            name=data.get("name", playlist_id),
+            description=data.get("description", ""),
+            run_mode=data.get("runMode", "parallel"),
+            items=input_items or None,
+            parameters=data.get("parameters") or None,
+            characteristics=chars,
+            upload_recordings=data.get("uploadRecordingsOnSuccess"),
+        )
+    except ToscaError as e:
+        _exit_err(str(e))
+
+    if as_json:
+        _output_json({"playlistId": playlist_id, "characteristic": {"name": char_name, "value": char_value}})
+    else:
+        console.print(f"[green]✓ Playlist {playlist_id}:[/green] "
+                      f"characteristic [bold]{char_name}[/bold] = [cyan]{char_value}[/cyan]")
+
+
 @playlists_app.command("delete")
 def playlists_delete(
     playlist_id: str  = typer.Argument(..., help="Playlist Id"),
@@ -2598,8 +2654,9 @@ below and return ONLY the exact command string — no explanation, no markdown:
   tosca playlists list       [--search <query>] [--limit N]
   tosca playlists get        <id>
   tosca playlists create     --name <name> [--run-mode parallel|sequential|sequentialOnSameAgent]
-  tosca playlists update     <id> --name <name>
-  tosca playlists delete     <id>
+  tosca playlists update              <id> --name <name>
+  tosca playlists set-characteristic  <id> --name <key> --value <val>
+  tosca playlists delete              <id>
   tosca playlists run        <playlistId> [--wait] [--private] [--param-overrides '{"p":"v"}']
   tosca playlists status     <runId>
   tosca playlists cancel     <runId>

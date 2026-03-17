@@ -256,8 +256,12 @@ python tosca_cli.py playlists get <playlistId>
 
 # Create / update / delete a playlist
 python tosca_cli.py playlists create --name "Smoke" --json-file playlist.json
-python tosca_cli.py playlists update <playlistId> --json-file updated.json
+python tosca_cli.py playlists update <playlistId> --name "New Name"
 python tosca_cli.py playlists delete <playlistId> --force
+
+# Add or update a characteristic (e.g. pin to a specific agent)
+python tosca_cli.py playlists set-characteristic <playlistId> \
+    --name AgentIdentifier --value Tosca-Team-Agent
 
 # Trigger a run (returns RunId immediately)
 python tosca_cli.py playlists run <playlistId>

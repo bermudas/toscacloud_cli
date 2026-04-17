@@ -65,6 +65,83 @@ python tosca_cli.py playlists attachments <runId>           # table of SAS URLs 
 
 Alternative source: the local E2G agent mirror at `C:\Users\<user>\AppData\Local\Temp\E2G\…` (same content, no SAS expiry).
 
+## Agent & skill wiring in this repo
+
+All AI coding tools share one storage layout — no mirroring or symlinks needed:
+
+| What | Path | Who reads it |
+|------|------|--------------|
+| Skills ([agentskills.io](https://agentskills.io) spec) | `.claude/skills/<name>/SKILL.md` + `references/` + `scripts/` | Claude Code, GitHub Copilot (CLI + VS Code), Cursor, Gemini CLI, OpenAI Codex, etc. — all recognize `.claude/skills/` as an official skill directory |
+| Claude Code subagent | `.claude/agents/<name>.md` | `Agent` tool with `subagent_type: <name>` |
+| VS Code Copilot custom agent / chat mode | `.github/agents/<name>.agent.md` | Copilot in VS Code |
+| Repo-wide Claude brief | `CLAUDE.md` (this file) | Claude Code |
+| Repo-wide Copilot brief | `.github/copilot-instructions.md` | GitHub Copilot |
+| Tool-agnostic pointer | `AGENTS.md` at root | Many agents recognize this by convention |
+| MCP servers | `.mcp.json` (Claude) + `.vscode/mcp.json` (VS Code) | Each tool has its own |
+
+Current skills: `tosca-automation` (TOSCA Cloud full lifecycle), `browser-verify` (real-mouse CDP browser inspection).
+Current subagents: `tosca` (delegated TOSCA work in isolated context).
+
+When adding a new skill, put it under `.claude/skills/` — both Claude and Copilot will pick it up.
+
+## Polling personal-agent run results via MCP
+
+The CLI's `playlists status/logs` returns **403** on personal-agent runs — `Tricentis_Cloud_API` can't see them. Use MCP:
+
+1. **Authoritative pass/fail for a specific playlist** — `mcp__ToscaCloudMcpServer__GetRecentPlaylistRunLogs(playlistId)`. Returns a succeeded-and-failed-log pair; `["No succeeded runs found."]` means the latest run for that playlist did **not** pass.
+2. **Find an executionId for your run** — `mcp__ToscaCloudMcpServer__GetRecentRuns({nameFilter: "<exact playlist name>"})`. The `nameFilter` must be the **exact** playlist name including any em-dash (`—`, `\u2014`) / en-dash; partial substring doesn't match. Returns executionIds for runs of that playlist.
+3. **Inspect failures** — `mcp__ToscaCloudMcpServer__GetFailedTestSteps({runIds: ["<executionId>"]})`. Requires the **executionId**, not the `playlistRun.id` returned by `RunPlaylist` — passing the latter errors with `"Run with the specified ID doesn't exist."`
+4. **Do not** trust `GetRecentRuns({stateFilter})` without `nameFilter` — it returns ~10 executionIds sorted alphabetically by UUID (not by time) and you can't tell which is yours. Always filter by name.
+
+Compact recipe after `RunPlaylist(...runOnAPersonalAgent=true)`:
+```
+wait ~60–120s
+runs = GetRecentRuns({ nameFilter: "<playlist-name-with-em-dash>" })
+newExec = pick id not in previously-seen set
+GetFailedTestSteps({ runIds: [newExec] })
+```
+
+## Iterative test-development loop (Local Runner + MCP)
+
+The fastest debug loop for a brand-new test case is to bind it to the user's **own machine as a personal agent** and re-run via MCP after each fix. This is the path the Portal's "Run on personal agent" button uses.
+
+### One-time setup on the developer machine
+1. Install the **Tosca Local Runner / Cloud Agent** (a.k.a. E2G personal agent) — registers under the developer's user identity in TOSCA Cloud.
+2. Install and enable the **Tricentis Automation Extension** in Chrome and/or Edge (the browser the test will drive).
+3. Keep the target browser window **maximized** during the run — TOSCA matches elements relative to viewport coordinates and shrunken / minimized windows cause `Element not in view` / `Coordinate out of bounds` failures.
+
+### CLI vs MCP — identity matters
+- **CLI** (`tosca_cli.py`) uses `Tricentis_Cloud_API` (`client_credentials`). It can only see and dispatch to **shared / team / cloud** agents (`"private": false` in `_e2g/api/agents`). Personal agents are filtered out — `GET /_e2g/api/agents/<personalAgentId>` returns **403 "Unauthorized access to agent"**, and any `playlists run` will sit `pending` forever.
+- **MCP** (`ToscaCloudMcpServer`) is wired in `.vscode/mcp.json` via `mcp-remote` with PKCE OAuth. First connection opens a browser, the developer logs in to Okta as themselves, and the refresh token is cached. From then on every MCP call carries the **developer's user identity**, so it can list, dispatch to, and read runs from the developer's personal agent.
+
+### The loop
+```
+1. Explore the target site/screen with Playwright MCP
+   - browser_navigate <url> → browser_snapshot → identify elements
+   - For Web: find Tag / InnerText / HREF / unique ClassName
+   - Run browser_evaluate to confirm the locator is unique (querySelectorAll(...).length === 1)
+
+2. Build / update the test artifacts with the CLI (service-account is fine here)
+   - python tosca_cli.py modules create / modules update --json-file …
+   - python tosca_cli.py cases create / cases update --json-file …
+
+3. Trigger on the developer's personal agent via MCP
+   - mcp__ToscaCloudMcpServer__RunPlaylist(playlistId, runOnAPersonalAgent=true)
+   - Local Runner picks it up; the developer sees the maximized browser drive itself
+
+4. Poll completion via MCP (CLI can't see private runs — 403)
+   - mcp__ToscaCloudMcpServer__GetRecentRuns({stateFilter: "Succeeded"|"Failed"|"Running"})
+   - The newly returned id is your executionId
+
+5. On failure, inspect via MCP
+   - mcp__ToscaCloudMcpServer__GetFailedTestSteps({runIds:[<executionId>]})
+   - Returns the per-step failure tree with the engine's exact message ("No matching tab", stack trace, etc.)
+
+6. Fix the offending module/step in the CLI, go back to step 3
+```
+
+The playlist itself doesn't need any `AgentIdentifier` characteristic — `runOnAPersonalAgent: true` is the entire routing instruction. The CLI's service-token-side `playlists logs` only works for shared-agent runs; for personal-agent runs use MCP for both triggering *and* failure inspection.
+
 ## Running a quick smoke test
 
 ```bash

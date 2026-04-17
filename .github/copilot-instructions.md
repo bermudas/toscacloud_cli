@@ -5,6 +5,14 @@
 Single-file Python CLI (`tosca_cli.py`) for Tricentis TOSCA Cloud REST APIs.
 `ToscaClient` class handles all HTTP. Typer sub-apps expose commands per API surface.
 
+## Agents + skills layout (shared with Claude Code)
+
+- **Skills** (agentskills.io spec) live at `.claude/skills/<name>/SKILL.md` — Copilot (CLI + VS Code) and Claude Code both auto-discover this path; no mirroring needed. Current skills: `tosca-automation`, `browser-verify`.
+- **VS Code Copilot custom agent** at `.github/agents/tosca.agent.md` — full TOSCA operator persona with VS Code-native tool bindings.
+- **Claude Code subagent** at `.claude/agents/tosca.md` — same persona for Claude's `Agent` tool.
+- **Tool-agnostic repo brief** at `/AGENTS.md` — pointer index; `.github/copilot-instructions.md` (this file) and `/CLAUDE.md` hold the tool-specific details.
+- **MCP servers** configured in `.mcp.json` (Claude) and `.vscode/mcp.json` (VS Code) — the TOSCA Cloud MCP server is wired via `mcp-remote` with PKCE OAuth for the developer's identity.
+
 ## Code style
 
 - Python 3.10+, type hints throughout, `|` union syntax (not `Optional` where avoidable).
@@ -40,10 +48,23 @@ client.e2g_url(path)           # /{spaceId}/_e2g/api/{path}            (executio
 - **Step-level logs via E2G API** (works under `Tricentis_Cloud_API`): `playlists logs <runId>` resolves the run's `executionId`, walks `/_e2g/api/executions/{executionId}` units, lists attachments, and downloads each via SAS-signed Azure Blob URLs (`logs.txt`, `JUnit.xml`, `TBoxResults.tas`, `TestSteps.json`, `Recording.mp4`). Use `--save <dir>` to dump all attachments; `--execution-id / -e` if the input is already an executionId. `playlists attachments <runId>` lists SAS URLs without downloading.
 - **`playlistRun.id` ≠ E2G `executionId`**: the `_e2g/api/executions/{id}` endpoint keys on `PlaylistRunV1.executionId`, not the playlist run's own `id`. Passing the playlist run id 404s. Always read `executionId` from `playlists status <runId>` first (or let the CLI commands above do it).
 - **SAS URL caveats**: TTL ≈ 30 min; the blob GET must NOT carry an Authorization header — the SAS signature is the entire auth. Attachment names come back as `name + fileExtension` pairs; `name` is one of `logs`, `JUnit`, `TBoxResults`, `TestSteps`, `Recording`.
+- **Personal-agent runs need MCP, not the CLI**: `Tricentis_Cloud_API` (`client_credentials`) is filtered out of personal-agent records — `_e2g/api/agents/<personalAgentId>` returns 403, and any `playlists run`/`testDebugging/runs` from the CLI sits `Queued` forever. The Portal's "Run on personal agent" button uses the user's own Okta token. From the agent context, mirror that by calling `mcp__ToscaCloudMcpServer__RunPlaylist(playlistId, runOnAPersonalAgent=true)` — `mcp-remote` with PKCE in `.vscode/mcp.json` carries the developer's user identity. Inspect failures via `mcp__ToscaCloudMcpServer__GetRecentRuns({stateFilter})` + `GetFailedTestSteps({runIds})` since the CLI's `playlists status`/`logs` returns 403 on private runs. Local Runner preflight: install Tosca Local Runner, enable Tricentis Automation Extension in Chrome and/or Edge, keep the target browser **maximized**.
+- **Polling personal-agent results — which MCP call does what**:
+  - `GetRecentPlaylistRunLogs(playlistId)` — authoritative pass/fail for the latest per-playlist run; `["No succeeded runs found."]` means did-not-pass.
+  - `GetRecentRuns({nameFilter: "<exact playlist name>"})` — returns executionIds only for matching playlist. The `nameFilter` must be **exact** including em-dash/en-dash characters (`—` is `\u2014`); partial substring matches return `[]`.
+  - `GetFailedTestSteps({runIds: ["<executionId>"]})` — takes **executionId** (returned by `GetRecentRuns`), never the `playlistRun.id` returned by `RunPlaylist` (the latter errors with `"Run with the specified ID doesn't exist."`).
+  - `GetRecentRuns({stateFilter})` without nameFilter returns ~10 executionIds sorted alphabetically by UUID, not by time — not reliable for locating your run.
 
 ## Html engine runtime quirks
 
-- **"More than one matching tab"**: agents that reuse the user's personal Chrome match multiple tabs with `Title=*`. Add a module-level `Url=https://<host>*` TechnicalId to scope document matching to the test host.
+- **All TOSCA value expressions are UPPERCASE in braces**. Canonical references:
+  - [Click operations](https://docs.tricentis.com/tosca-cloud/en-us/content/references/click_operations.htm) — `{CLICK}`, `{DOUBLECLICK}`, `{RIGHTCLICK}`, `{ALTCLICK}`, `{CTRLCLICK}`, `{SHIFTCLICK}`, `{LONGCLICK}`, `{MOUSEOVER}`, `{DRAG}`, `{DROP}`. Advanced: `{MOUSE[<action>][MoveMethod][OffsetH][OffsetV]}`. `{Hover}` is **not** valid — fails at runtime with _"No suitable value found for command Hover"_; use `{MOUSEOVER}` and add it to the Link's `valueRange`. Synthetic JS `dispatchEvent('mouseover')` does not fire the `:hover` pseudo-class; `{MOUSEOVER}` emits a real mouse move.
+  - [Keyboard commands](https://docs.tricentis.com/tosca-cloud/en-us/content/references/keyboard_operations.htm) — `{ENTER}` `{TAB}` `{ESC}` `{F1}`..`{F24}` arrows, modifiers; advanced `{SENDKEYS["..."]}`, `{KEYPRESS[code]}`, `{KEYDOWN/KEYUP[code]}`, `{TEXTINPUT["..."]}`.
+  - [Action modes](https://docs.tricentis.com/tosca-cloud/en-us/content/references/action_types.htm) — `Input`, `Insert` (API), `Verify` (+ `actionProperty` + `operator`), `Buffer`, `Output` (capture control prop into `{B[name]}`), `WaitOn`, `Select`, `Constraint`, `Exclude`.
+  - [Dynamic expressions](https://docs.tricentis.com/tosca-cloud/en-us/content/references/values_overview.htm) — `{CP[Param]}` config param; `{B[Var]}` buffer (**case-sensitive, test-case-scoped**, does NOT cross cases); `{MATH[...]}` arithmetic with functions `Abs/Ceiling/Floor/Max/Min/Pow/Round/Sign/Sqrt/Truncate`; string ops `{STRINGLENGTH}`, `{STRINGTOLOWER}`, `{STRINGTOUPPER}`, `{TRIM}`, `{STRINGREPLACE}`, `{STRINGSEARCH}`, `{BASE64}`, `{NUMBEROFOCCURRENCES}` (with optional `[IGNORECASE]` / `[REPLACEFIRST]` / `[FINDFIRST]`).
+- **`InnerText` TechnicalId is exact-match**: a card link wrapping an `<h2>` renders `innerText="<caption>\n<heading>"` and won't match a short caption. Drop `InnerText`; use `Tag` + `HREF` + `ClassName` or a unique `Title` attribute.
+- **Parent `visibility:hidden` propagates**: closed mega-menu items are filtered out by default `IgnoreInvisibleHtmlElements=True`. Open the parent first, or set `IgnoreInvisibleHtmlElements=False` as a module-level Steering param.
+- **"More than one matching tab"**: agents that reuse the user's personal Chrome match multiple tabs with `Title=*`. Add a module-level `Url=https://<host>*` TechnicalId to scope document matching to the test host. For repeated runs on the same workstation, prepend a `ControlFlowItemV2 If` to Precondition — condition = `Verify <always-visible app element> Visible=True`, then = `CloseBrowser Title="*<AppName>*"`. Without this, the 2nd+ run of the day fails with this error.
 - **"The Browser could not be found"**: Tricentis Chrome extension is not attached to the Chrome instance the agent is driving. Environment fix (install/enable the extension in the target profile) — no test-case change resolves this.
 - **`CloseBrowser Title="*"` fails on empty agents**: throws `UnestablishedConnectionException` after 10 s when no Chrome is running. Remove the cleanup on grid agents, or wrap in a `ControlFlowItemV2 If` with a narrow `Title="*<AppName>*"` on workstation agents.
 - **`ControlFlowItemV2 If` for optional elements**: works when the module-level `Title`/`Url` can cleanly miss (Verify evaluates `false`). Hard-fails when the document itself isn't found — narrow the module-level selector before relying on `If`.

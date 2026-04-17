@@ -39,7 +39,8 @@ The MBT API has no list endpoint. Use Inventory as the discovery layer:
 | Extend coverage / gap fill | `inventory search` in the folder → `cases steps --json` on ALL existing cases to find the pattern |
 | Create new test case | `inventory search` for similar cases first → clone or assemble from template |
 | Find something | `inventory search "<keywords>" [--type TestCase\|Module\|folder]` |
-| Run tests | `playlists list` → `playlists run <id> --wait` |
+| Run tests on grid/team agent | CLI: `playlists list` → `playlists run <id> --wait` |
+| Run on developer's local machine (iterative debug) | MCP: `RunPlaylist(playlistId, runOnAPersonalAgent=true)` — see Iterative loop section below |
 | Move / organize | `inventory move <type> <entityId> --folder-id <folderEntityId>` |
 | Export / import | `cases export-tsu --ids "id1,id2" --output file.tsu` / `cases import-tsu --file file.tsu` |
 | Create Web test case | Use Playwright to snapshot the page → discover element locators → create module → create case → see [Web Automation guide](references/web-automation.md) |
@@ -113,7 +114,15 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | `version` in PUT body | Omit — rejected by case, block, **and** module PUT endpoints. CLI's `update_case`/`update_block`/`update_module` strip it automatically |
 | MBT test case ID = Inventory `entityId` | `cases get`/`steps`/`update` accept only the Inventory `entityId`. Playlist item `id` and inventory `attributes.surrogate` both 404. Resolve via `inventory search … --type TestCase --json` → `id.entityId` |
 | Failed playlist run with `<failure />` only | Playlists v2 has no step-level log endpoint, but E2G does. Use `playlists logs <runId>` — it walks `/_e2g/api/executions/{executionId}` units → `/units/{unitId}/attachments` → SAS-signed Azure Blob downloads (logs.txt, JUnit.xml, TBoxResults.tas, TestSteps.json, Recording.mp4). Works under `Tricentis_Cloud_API`. The endpoint keys on `PlaylistRunV1.executionId`, **not** the playlist run's `id` — the CLI resolves this via `playlists status` automatically; pass `--execution-id / -e` to skip the lookup. SAS TTL ≈ 30 min; the blob GET must NOT carry an Authorization header. |
-| Html "More than one matching tab" | Agent shares user's Chrome profile. Add module-level `Url=https://<host>*` TechnicalId to scope document matching to one tab |
+| Personal-agent runs need MCP, not CLI | `Tricentis_Cloud_API` (CLI service token) cannot dispatch to or read a developer's personal Local Runner — `_e2g/api/agents/<personalAgentName>` returns 403, and `playlists status <runId>` on a private run returns 403. Use `mcp__ToscaCloudMcpServer__RunPlaylist(playlistId, runOnAPersonalAgent=true)` to trigger and `GetRecentRuns` + `GetFailedTestSteps` to inspect — MCP carries the developer's user identity (PKCE OAuth via `mcp-remote` configured in `.vscode/mcp.json`). |
+| Local Runner preflight | Before triggering on a personal agent: install Tosca Local Runner / Cloud Agent on the developer's machine; install + enable Tricentis Automation Extension in Chrome and/or Edge; keep the target browser **maximized** (minimized windows cause coordinate-out-of-bounds and silent click misses). |
+| Html "More than one matching tab" | Agent shares user's Chrome profile. Add module-level `Url=https://<host>*` TechnicalId to scope document matching to one tab. Also prepend a `ControlFlowItemV2 If` to Precondition: condition = Verify always-visible app element Visible=True, then = `CloseBrowser Title="*<AppName>*"` |
+| Click operation values | Uppercase in braces: `{CLICK}`, `{DOUBLECLICK}`, `{RIGHTCLICK}`, `{ALTCLICK}`, `{CTRLCLICK}`, `{SHIFTCLICK}`, `{LONGCLICK}`, `{MOUSEOVER}`, `{DRAG}`, `{DROP}`. For hover use `{MOUSEOVER}` — **not** `{Hover}` (fails with _"No suitable value found for command Hover"_). Add `{MOUSEOVER}` to the Link's `valueRange`. Synthetic JS events don't fire CSS `:hover`; TOSCA's `{MOUSEOVER}` emits a real mouse move |
+| Keyboard command values | All uppercase-braced: `{ENTER}` `{TAB}` `{ESC}` `{F1}`..`{F24}` `{UP}` `{DOWN}` `{LEFT}` `{RIGHT}` `{BACKSPACE}` `{DEL}` `{HOME}` `{END}` `{SHIFT}` `{CTRL}` `{ALT}`. Advanced: `{SENDKEYS["..."]}`, `{KEYPRESS[code]}`, `{KEYDOWN/KEYUP[code]}`, `{TEXTINPUT["..."]}`. Ref: [keyboard_operations](https://docs.tricentis.com/tosca-cloud/en-us/content/references/keyboard_operations.htm) |
+| Action mode cheat-sheet | `Input` write; `Insert` (API modules); `Verify` + `actionProperty` assert; `Buffer`/`Output` capture into `{B[name]}`; `WaitOn` dynamic wait; `Select` pick a specific child; `Constraint`/`Exclude` narrow tables. Ref: [action_types](https://docs.tricentis.com/tosca-cloud/en-us/content/references/action_types.htm) |
+| Dynamic expressions | `{CP[Param]}` config param; `{B[Var]}` buffer (case-sensitive, **test-case-scoped** — does NOT cross cases); `{MATH[...]}` arithmetic with `Abs/Ceiling/Floor/Max/Min/Pow/Round/Sign/Sqrt/Truncate`; string ops `{STRINGLENGTH}` `{STRINGTOLOWER}` `{STRINGTOUPPER}` `{TRIM}` `{STRINGREPLACE}` `{STRINGSEARCH}` `{BASE64}` `{NUMBEROFOCCURRENCES}` |
+| `InnerText` exact-match | TOSCA's `InnerText` TechnicalId matches the full element `innerText` exactly, including text of nested children. A card link wrapping an `<h2>` will have `innerText="<caption>\n<heading>"` and will not match a short caption. Drop `InnerText`; use Tag + HREF + ClassName or a `Title` attribute |
+| Parent `visibility:hidden` propagates | Closed mega-menus hide children via parent styling; TOSCA's default `IgnoreInvisibleHtmlElements=True` filters them out. Open the parent before looking up the child, or set `IgnoreInvisibleHtmlElements=False` as a Steering module param |
 | Html "The Browser could not be found" | Tricentis Chrome extension not attached to the agent's Chrome. Fix on the agent (install/enable extension), **not** in the test case |
 | `ControlFlowItemV2` for optional elements | Works cleanly when the module-level selector (`Title`/`Url`) can produce a clean no-match. Verify steps inside the condition evaluate `false` on hidden elements; they hard-fail when the document itself can't be found. Narrow the module-level selector before relying on `If` |
 | Test case PUT requires `id` in body | The full PUT body must include `"id": "<caseId>"` — API rejects bodies without it |
@@ -141,6 +150,27 @@ Items use `$type`:
 - `TestStepFolderReferenceV2` — block reference, ID in `reusableTestStepBlockId`
 - `TestStepV2` — atomic step
 - `ControlFlowItemV2` — If/Then conditional
+
+## Iterative test-development loop (Local Runner + MCP)
+
+Use this loop when developing a new test case end-to-end on the developer's own machine — fastest feedback because no shared queueing, and the developer can watch the browser drive itself.
+
+**One-time prerequisites on the developer machine**
+1. Install **Tosca Local Runner / Cloud Agent** — registers a *private* personal agent under the developer's Okta identity (visible only to MCP, not to the CLI service token).
+2. Install + enable the **Tricentis Automation Extension** in Chrome and/or Edge.
+3. Keep the target browser window **maximized** before each run (minimized → coordinate-out-of-bounds, missed clicks).
+
+**The loop**
+1. **Explore** the target site with Playwright MCP (`browser_navigate` → `browser_snapshot` → identify Tag/InnerText/HREF/ClassName; verify locator uniqueness with `browser_evaluate`).
+2. **Build / update** modules and the test case via the CLI (service token is fine for build operations).
+3. **Trigger** via MCP — NOT the CLI: `mcp__ToscaCloudMcpServer__RunPlaylist(playlistId, runOnAPersonalAgent=true)`. The CLI's service token is 403'd on personal agents.
+4. **Wait** via MCP: `mcp__ToscaCloudMcpServer__GetRecentRuns({stateFilter: "Succeeded"|"Failed"|"Running"})` — the new id appearing is the executionId.
+5. **Inspect failures** via MCP: `mcp__ToscaCloudMcpServer__GetFailedTestSteps({runIds:[<executionId>]})` — returns the per-step failure tree with the engine's exact message + stack trace.
+6. **Fix** the failing module/step/RTSB via the CLI, then back to step 3.
+
+**Do not** pin `AgentIdentifier` on the playlist — `runOnAPersonalAgent: true` is the entire routing instruction, and the playlist stays generic for grid runs too.
+
+For shared/team-agent runs (CI, scheduled jobs, parameter-overridden runs), use the CLI's `playlists run` and `playlists logs` — those work fine under the service-account token.
 
 ## Detailed how-to guides
 

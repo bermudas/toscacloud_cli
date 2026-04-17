@@ -31,3 +31,5 @@ junit-results.xml
 .DS_Store
 
 .playwright-mcp/*
+.mcp.json
+.vscode/mcp.json

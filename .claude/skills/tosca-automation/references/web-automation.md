@@ -15,6 +15,10 @@
 
 **Always verify element uniqueness before writing the module.** Many sites render nav links in both a mobile hamburger menu and a desktop nav bar. TOSCA will fail at runtime, not at save time, if a locator matches more than one element.
 
+> **`InnerText` is exact-match in TOSCA's Html engine.** A link that wraps additional text nodes (e.g. an `<a>` containing both a caption and a nested heading) has `innerText` equal to the concatenation of all descendant text — not just the visible caption. A short `InnerText="<caption>"` will not match. Drop `InnerText` from the TechnicalIds and use `Tag` + `HREF` + `ClassName` (or a unique `Title` attribute) instead.
+>
+> **Parent `visibility:hidden` propagates.** A mega-menu closed by default has its items rendered but hidden via parent `visibility:hidden` / `opacity:0`. TOSCA's default `IgnoreInvisibleHtmlElements=True` filters these out — your module-level selector finds the document but attribute lookup reports `"Could not find Link ..."`. Two fixes: (1) open the parent (click the menu trigger, then add a Wait + the hover/click step); (2) add `IgnoreInvisibleHtmlElements=False` as a Steering module parameter.
+
 ## Module structure
 
 ```json
@@ -83,6 +87,67 @@ Scanned modules also carry a `SelfHealingData` steering param with hints about t
 | `<div>`/`<span>` container to verify | `Container` | — |
 | page root | `HtmlDocument` | — (module-level only) |
 
+## Value expression reference
+
+All values in a TestStepValue are **UPPERCASE commands wrapped in braces**. Source of truth: Tosca Cloud [References docs](https://docs.tricentis.com/tosca-cloud/en-us/content/references/values_overview.htm).
+
+### Action modes (TestStepValue `actionMode`)
+
+| Mode | Use |
+|------|-----|
+| `Input` | Write a value into the control |
+| `Insert` | Insert a value into an API module control |
+| `Verify` | Assert — compare expected vs actual; pair with `actionProperty` (`Visible`, `InnerText`, etc.) and `operator` |
+| `Buffer` | Capture the control's value into the buffer named by `value` |
+| `Output` | Capture a specific control property (`Value`, `InnerText`, `Enabled`, `Exists`, `Visible`) into a buffer |
+| `WaitOn` | Poll the control until it reaches the specified state |
+| `Select` | Choose a specific child control (e.g. a menu item, tab, row) — required for hover-revealed submenus if your tooling exposes it that way |
+| `Constraint` | Narrow the parent scope — e.g. pick the right table row by a column value |
+| `Exclude` | Remove specific rows/columns from a table operation |
+
+### Click / mouse values (on Link, Button, Checkbox, etc.)
+
+| Value | Action |
+|-------|--------|
+| `{CLICK}` | Left click |
+| `{DOUBLECLICK}` | Double click |
+| `{RIGHTCLICK}` | Right click |
+| `{ALTCLICK}` / `{CTRLCLICK}` / `{SHIFTCLICK}` | Modified click (plus `L`/`R` variants e.g. `{LALTCLICK}`) |
+| `{LONGCLICK}` | ~2-second press |
+| `{MOUSEOVER}` | **Real mouse move over element** — fires CSS `:hover` |
+| `{DRAG}` / `{DROP}` | Drag-and-drop pair |
+| `X` | JS-click (no mouse event) |
+| `{CLICK[OffsetH][OffsetV]}` | Click at pixel/percent offset from top-left of the control |
+| `{MOUSE[<action>][Jump\|Smooth\|HorizontalFirst\|VerticalFirst][OffsetH][OffsetV]}` | Advanced: full control over move method + offset |
+
+> `{Hover}` is **not** valid — TOSCA errors with _"No suitable value found for command Hover"_. Use `{MOUSEOVER}`. Synthetic JS events don't fire the CSS `:hover` pseudo-class; `{MOUSEOVER}` emits a real mouse move that does.
+
+Example Link `valueRange` that includes hover:
+```json
+"valueRange": ["{CLICK}", "{RIGHTCLICK}", "{MOUSEOVER}"]
+```
+
+### Keyboard commands (on TextBox / any focusable)
+
+Single key: `{ENTER}` `{RETURN}` `{TAB}` `{ESC}` `{ESCAPE}` `{BACKSPACE}` `{DEL}` `{HOME}` `{END}` `{LEFT}` `{RIGHT}` `{UP}` `{DOWN}` `{INSERT}` `{CLEAR}` `{F1}`–`{F24}` — and modifiers `{SHIFT}` `{CTRL}` `{ALT}` (plus `L`/`R` variants), plus `{CAPSLOCK}` `{NUMLOCK}` `{SCROLLLOCK}` `{PRINT}` `{BREAK}` `{LWIN}` `{RWIN}` `{APPS}`.
+
+Advanced:
+- `{SENDKEYS["<Microsoft SendKeys string>"]}` — Windows SendKeys-style sequence
+- `{KEYPRESS[<VK code>]}` — single virtual-key press (no `VK_` prefix)
+- `{KEYDOWN[<code>]}` / `{KEYUP[<code>]}` — hold / release a key
+- `{TEXTINPUT["<unicode text>"]}` — raw unicode input (bypasses keymap)
+
+### Dynamic expressions (in any `value` field)
+
+| Expression | Purpose |
+|------------|---------|
+| `{CP[ParamName]}` | Reference a test-configuration parameter (e.g. `{CP[Username]}`) |
+| `{B[bufferName]}` | Reference a buffered value — **case-sensitive, test-case-scoped** (cannot cross test-case boundaries) |
+| `{MATH[<expr>]}` | Arithmetic: `+ - * / %`, comparisons, logical, bitwise; functions `Abs Ceiling Floor Max Min Pow Round Sign Sqrt Truncate` (e.g. `{MATH[2*(2+5)]}` → `14`) |
+| `{BASE64}`, `{STRINGLENGTH}`, `{STRINGTOLOWER}`, `{STRINGTOUPPER}`, `{TRIM}`, `{STRINGREPLACE}`, `{STRINGSEARCH}`, `{NUMBEROFOCCURRENCES}` | String ops; some accept `[IGNORECASE]` / `[REPLACEFIRST]` / `[FINDFIRST]` |
+
+Other value-expression families documented but rarely needed for basic web cases: scroll operations, regex capture, random values, date/time, number formats, intervals, resource expressions, user simulation, key-vault secrets. See Tosca's [value expressions overview](https://docs.tricentis.com/tosca-cloud/en-us/content/references/values_overview.htm).
+
 ## Standard framework module IDs
 
 | Step | Module ID | Attribute | Attr ref ID | Notes |
@@ -105,6 +170,13 @@ Teardown       — CloseBrowser + optional Wait
 ```
 
 > **Why CloseBrowser first?** A leftover browser tab from a previous run causes _"More than one matching tab"_. Starting with `CloseBrowser Title="*"` (wildcard) guarantees a clean slate — **on grid agents and workstations that run a dedicated Chrome profile**. On workstation agents that reuse the user's personal Chrome, `Title="*"` would close the user's own tabs — narrow it to `Title="*<AppName>*"` and wrap in a `ControlFlowItemV2 If` that first verifies a known app element is visible.
+>
+> **Leftover-tab cleanup, idiomatic form** — when running on personal Chrome, prepend to Precondition:
+> ```
+> If  condition = Verify <always-visible app element> Visible=True
+>     then       = CloseBrowser Title="*<AppName>*"
+> ```
+> The condition Verify has to be checkable cheaply with no user action (e.g. the site's Menu button, logo link, or any element that's in the page chrome). If the Verify returns false (no leftover tab) the If skips and OpenUrl proceeds. If Verify returns true, CloseBrowser runs first. Without this, the very first step after OpenUrl fails with `"More than one matching tab was found"` on the second and later runs of the day.
 
 > **When CloseBrowser fails with `UnestablishedConnectionException`** — the agent has no running Chrome at all (typical on a fresh grid agent). `CloseBrowser` tries to handshake with the extension, hits a 10 s timeout, and aborts. In that case remove the cleanup step entirely — `OpenUrl` will launch Chrome itself.
 

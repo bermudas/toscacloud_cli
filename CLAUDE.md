@@ -19,7 +19,7 @@ Config and token cache live in the project directory (`.env`, `token.json`) — 
 ## Architecture
 
 Single file, no sub-packages:
-- `ToscaClient` class — all HTTP calls, one method per API endpoint. URL builders: `identity()`, `mbt()`, `playlist()`, `inventory_url()`, `inventory_v1_url()`, `simulations_url()`.
+- `ToscaClient` class — all HTTP calls, one method per API endpoint. URL builders: `identity()`, `mbt()`, `playlist()`, `inventory_url()`, `inventory_v1_url()`, `simulations_url()`, `e2g_url()`.
 - Typer sub-apps: `config_app`, `identity_app`, `cases_app`, `modules_app`, `blocks_app`, `playlists_app`, `inventory_app`, `simulations_app`.
 - `_get_access_token()` — OAuth2 client_credentials, token cached in `token.json` (0600), auto-refreshed 60 s before expiry.
 - `_output_json()` — Rich syntax-highlighted JSON when stdout is a tty, plain `print(raw)` otherwise (for piping). Place `--json` **before** positional args.
@@ -45,6 +45,25 @@ python tosca_cli.py cases steps <caseId>               # step tree with all modu
 **Inventory search operators** — despite swagger showing PascalCase (`Contains`, `And`), the live API only accepts lowercase: `contains`, `and`.
 
 **Test case assembly** — when building new cases, always clone an existing one as a template. Each `TestStepFolderReferenceV2` needs a fresh `parameterLayerId` (ULID) and each parameter entry needs `referencedParameterId` pointing to the block's `businessParameter.id`.
+
+**MBT test case ID = Inventory `entityId`** — `cases get`/`cases steps`/`cases update` accept the Inventory `entityId` (e.g. `WcucATcH0UKiiL9aoQsJyg`). The playlist item's own `id` field and the inventory record's `attributes.surrogate` UUID **both 404** against the MBT API. Always resolve via `inventory search … --type TestCase --json` → `id.entityId` and pass that verbatim.
+
+**Debugging failed playlist runs** — Playlists v2 only returns a bare `<failure />` JUnit. The real per-step agent log lives behind the E2G API and is reachable from the CLI:
+
+```bash
+python tosca_cli.py playlists logs <runId>                  # prints logs.txt for each unit
+python tosca_cli.py playlists logs <runId> --save ./logs    # download all attachments per unit
+python tosca_cli.py playlists attachments <runId>           # table of SAS URLs per unit
+```
+
+3-step recipe these commands wrap (`Tricentis_Cloud_API` works as-is — no extra role needed):
+1. `GET /{spaceId}/_playlists/api/v2/playlistRuns/{runId}` → read `executionId`.
+2. `GET /{spaceId}/_e2g/api/executions/{executionId}` → run doc with `items[]` (one `UnitV1` per test case, each with `id`, `name`, `state`, `assignedAgentId`).
+3. `GET /{spaceId}/_e2g/api/executions/{executionId}/units/{unitId}/attachments` → SAS-signed Azure Blob URLs: `logs.txt`, `JUnit.xml`, `TBoxResults.tas`, `TestSteps.json`, `Recording.mp4` (only when recorded). SAS TTL ≈ 30 min; the blob GET needs **no Authorization header** — the signature is the entire auth.
+
+**Critical ID mapping**: `playlistRun.id` (e.g. `0d0e40dc-…`) **does not** resolve under `_e2g/api/executions/` — it 404s. Always use `playlistRun.executionId` (e.g. `7041def3-…`). The CLI commands above resolve this for you; pass `--execution-id / -e` to skip the lookup if you already have the executionId.
+
+Alternative source: the local E2G agent mirror at `C:\Users\<user>\AppData\Local\Temp\E2G\…` (same content, no SAS expiry).
 
 ## Running a quick smoke test
 

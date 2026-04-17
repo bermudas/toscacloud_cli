@@ -81,6 +81,9 @@ python tosca_cli.py playlists list
 python tosca_cli.py playlists list-runs
 python tosca_cli.py playlists run <id> --wait
 python tosca_cli.py playlists results <runId>
+python tosca_cli.py playlists logs <runId>                    # per-unit agent logs (E2G, full TBox transcript)
+python tosca_cli.py playlists logs <runId> --save ./logs      # save logs.txt + JUnit.xml + TBoxResults.tas + TestSteps.json
+python tosca_cli.py playlists attachments <runId>             # SAS URLs per unit (no download)
 
 # Folders
 python tosca_cli.py inventory move testCase <entityId> --folder-id <folderEntityId>
@@ -107,7 +110,12 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | Inventory search filter | Despite swagger, only lowercase works: `contains`, `and` |
 | SAP standard modules | Not in inventory. `SAP Logon`, `SAP Login`, `T-code` — use IDs directly from [SAP guide](references/sap-automation.md) |
 | TSU export field | `reusableTestStepBlockIds` (no double-e) |
-| `version` in PUT body | Omit — rejected by both case and block PUT endpoints |
+| `version` in PUT body | Omit — rejected by case, block, **and** module PUT endpoints. CLI's `update_case`/`update_block`/`update_module` strip it automatically |
+| MBT test case ID = Inventory `entityId` | `cases get`/`steps`/`update` accept only the Inventory `entityId`. Playlist item `id` and inventory `attributes.surrogate` both 404. Resolve via `inventory search … --type TestCase --json` → `id.entityId` |
+| Failed playlist run with `<failure />` only | Playlists v2 has no step-level log endpoint, but E2G does. Use `playlists logs <runId>` — it walks `/_e2g/api/executions/{executionId}` units → `/units/{unitId}/attachments` → SAS-signed Azure Blob downloads (logs.txt, JUnit.xml, TBoxResults.tas, TestSteps.json, Recording.mp4). Works under `Tricentis_Cloud_API`. The endpoint keys on `PlaylistRunV1.executionId`, **not** the playlist run's `id` — the CLI resolves this via `playlists status` automatically; pass `--execution-id / -e` to skip the lookup. SAS TTL ≈ 30 min; the blob GET must NOT carry an Authorization header. |
+| Html "More than one matching tab" | Agent shares user's Chrome profile. Add module-level `Url=https://<host>*` TechnicalId to scope document matching to one tab |
+| Html "The Browser could not be found" | Tricentis Chrome extension not attached to the agent's Chrome. Fix on the agent (install/enable extension), **not** in the test case |
+| `ControlFlowItemV2` for optional elements | Works cleanly when the module-level selector (`Title`/`Url`) can produce a clean no-match. Verify steps inside the condition evaluate `false` on hidden elements; they hard-fail when the document itself can't be found. Narrow the module-level selector before relying on `If` |
 | Test case PUT requires `id` in body | The full PUT body must include `"id": "<caseId>"` — API rejects bodies without it |
 | New case not in inventory immediately | After `cases create`, wait 3–10 s before searching — CLI retries automatically |
 | Placing a case after create/clone | Always run `inventory move testCase <newId> --folder-id <folderId>` — creation alone doesn't place it |

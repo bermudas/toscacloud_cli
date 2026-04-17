@@ -285,6 +285,15 @@ python tosca_cli.py playlists tc-runs <runId>
 python tosca_cli.py playlists results <runId>
 python tosca_cli.py playlists results <runId> --save results.json
 
+# Per-unit agent logs (full TBox transcript with .NET stack traces)
+python tosca_cli.py playlists logs <runId>
+python tosca_cli.py playlists logs <runId> --save ./logs            # save logs.txt + JUnit.xml + TBoxResults.tas + TestSteps.json per unit
+python tosca_cli.py playlists logs <executionId> -e --quiet --save ./logs   # input is already an E2G executionId
+
+# List per-unit attachments with their SAS-signed Azure Blob URLs (logs, JUnit, TBoxResults, TestSteps, Recording)
+python tosca_cli.py playlists attachments <runId>
+python tosca_cli.py playlists attachments <runId> --json
+
 # List all runs in the space
 python tosca_cli.py playlists list-runs
 python tosca_cli.py playlists list-runs --limit 100
@@ -421,6 +430,9 @@ python tosca_cli.py ask "cancel run xyz" --dry-run   # preview without executing
 | Inventory v3 search filter casing | The swagger documents `SearchFilterOperatorV1` as PascalCase (`Contains`, `And`), but the live API only accepts **lowercase** (`contains`, `and`). PascalCase returns 0 results. |
 | `--json` flag placement | Place `--json` **before** positional arguments: `cases get --json <id>` ✓. Using `--` as an end-of-options separator causes Typer to treat `--json` as a positional arg and silently fall back to Rich display output instead of JSON. |
 | Block IDs ≠ Module entity IDs | `inventory search --type Module` returns entity IDs for modules, but these do **not** work with `blocks get`. Block IDs must come from a test case: `cases get --json <caseId>` → `testCaseItems[].reusableTestStepBlockId` (where `$type == "TestStepFolderReferenceV2"`). |
+| `playlistRun.id` ≠ E2G `executionId` | The `_e2g/api/executions/{id}` endpoint keys on `PlaylistRunV1.executionId` (e.g. `7041def3-…`), not the playlist run's own `id` (e.g. `0d0e40dc-…`). Passing the playlist run id 404s with "Execution not found". `playlists logs` and `playlists attachments` resolve this via `playlists status` automatically — pass `--execution-id / -e` to skip the lookup. |
+| Playlists v2 has no per-step log endpoint | `playlists results <runId>` returns only `<failure />`. Use `playlists logs <runId>` instead — it routes through the E2G API and downloads the actual TBox transcript (logs.txt) plus JUnit.xml, TBoxResults.tas, TestSteps.json, and Recording.mp4 (when present). |
+| E2G attachment URLs are SAS-signed | The `contentDownloadUri` returned by `_e2g/api/executions/{id}/units/{id}/attachments` is a fully signed Azure Blob URL. **Do NOT add `Authorization`** to the GET — the SAS signature is the auth, and adding a Bearer token causes Azure to 403. SAS TTL ≈ 30 min; re-list to refresh. |
 
 ---
 
@@ -456,6 +468,31 @@ Both under `/{spaceId}/_mbt/api/v2/builder/`:
 `tsu/exports` body: `TsuExportRequestV2 { testCaseIds, moduleIds, reusableTestStepBlockIds }` → returns binary blob
 
 > **Note:** the request field is spelled `reusableTestStepBlockIds` (correct English), even though the API *path* uses the typo `reuseeable`.
+### E2G – Execution Units & Attachments
+
+All under `/{spaceId}/_e2g/api/`:
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `executions/{executionId}` | Execution doc with `items[]` (one `UnitV1` per test case) |
+| `GET` | `executions/{executionId}/units/{unitId}/attachments` | List attachments for a unit — returns SAS-signed Azure Blob URLs |
+
+`executionId` comes from `PlaylistRunV1.executionId` (NOT the playlist run's own `id`).
+
+Attachment record shape:
+```json
+{
+  "name": "logs",          // or "JUnit", "TBoxResults", "TestSteps", "Recording"
+  "fileExtension": "txt",  // or "xml", "tas", "json", "mp4"
+  "contentDownloadUri": "https://e2gweuprod001resblobs.blob.core.windows.net/.../logs?sv=…&se=…&sr=b&sp=r&sig=…",
+  "appendUri": "https://…?sp=a&sig=…"
+}
+```
+
+The blob hostname pattern is `https://e2g<region>prod001resblobs.blob.core.windows.net/<tenant-slug>/<spaceId>/<executionId>/<unitId>/<attachmentName>`. SAS TTL ≈ 30 min. The blob GET must NOT carry an `Authorization` header.
+
+Wrapped by `playlists logs` and `playlists attachments` in the CLI.
+
 ### MBT/Builder v2 – Reuseable Test Step Blocks
 
 All under `/{spaceId}/_mbt/api/v2/builder/reuseableTestStepBlocks/` (note the typo — "reuseable"):

@@ -55,6 +55,22 @@
 
 **The root-level `parameters` array must contain `Engine: Html`.** Without it, TOSCA throws `XModules and XModuleAttributes have to provide the configuration param "Engine"` at runtime. Scanned modules have it automatically; manually created ones do not.
 
+### Module-level identifiers (TechnicalId on the module root, not on an attribute)
+
+These determine *which HtmlDocument* (i.e. browser tab) the module binds to at runtime. On a shared-Chrome agent (user's personal browser with many tabs), the defaults are too loose.
+
+| Param | Type | Good value | Why |
+|-------|------|-----------|-----|
+| `Engine` | Configuration | `Html` | Required — see above |
+| `Title` | TechnicalId | `*<AppName>*` (glob) | Restricts document match by tab title |
+| `Url` | TechnicalId | `https://<host>*` | **Add this** to disambiguate when multiple tabs share a title pattern — this alone stops the _"More than one matching tab"_ error without needing a `CloseBrowser` first |
+| `ControlFramework` | Steering | `None` | Default for vanilla HTML |
+| `AllowedAriaControls` | Steering | `button; checkbox; combobox; link; listbox; menuitem; menuitemcheckbox; menuitemradio; option; radio; scrollbar; slider; spinbutton; switch; tab; textbox; treeitem` | Empty value causes erratic element resolution |
+| `EnableSlotContentHandling` | Steering | `False` | `True` triggers shadow-DOM traversal that many ordinary pages don't need |
+| `IgnoreInvisibleHtmlElements` | Steering | `True` | Skip off-screen duplicates of the same element |
+
+Scanned modules also carry a `SelfHealingData` steering param with hints about the page at scan time (Title + URL). **When reusing a scanned module for a different flow, drop the `SelfHealingData` entry** — the module still works via TechnicalIds, and stale self-healing hints can interfere with document matching on the new flow.
+
 ## businessType by element
 
 | Element | `businessType` | `valueRange` |
@@ -88,7 +104,11 @@ Verification   — Verify steps (actionMode: Verify + actionProperty)
 Teardown       — CloseBrowser + optional Wait
 ```
 
-> **Why CloseBrowser first?** A leftover browser tab from a previous run causes _"More than one matching tab"_. Starting with `CloseBrowser Title="*"` (wildcard) guarantees a clean slate.
+> **Why CloseBrowser first?** A leftover browser tab from a previous run causes _"More than one matching tab"_. Starting with `CloseBrowser Title="*"` (wildcard) guarantees a clean slate — **on grid agents and workstations that run a dedicated Chrome profile**. On workstation agents that reuse the user's personal Chrome, `Title="*"` would close the user's own tabs — narrow it to `Title="*<AppName>*"` and wrap in a `ControlFlowItemV2 If` that first verifies a known app element is visible.
+
+> **When CloseBrowser fails with `UnestablishedConnectionException`** — the agent has no running Chrome at all (typical on a fresh grid agent). `CloseBrowser` tries to handshake with the extension, hits a 10 s timeout, and aborts. In that case remove the cleanup step entirely — `OpenUrl` will launch Chrome itself.
+
+> **`"The Browser could not be found"` at the first interactive step** — the Tricentis Chrome extension is not installed/enabled in the Chrome instance the agent is driving. OpenUrl opens the tab, but subsequent steps have no bridge. Fix on the agent (install the extension in the profile, or configure a dedicated profile). **No test-case change resolves this.**
 
 ## OpenUrl step template (all 3 params required)
 
@@ -175,6 +195,79 @@ Supported: `Chrome`, `Edge`, `Firefox`.
 ```
 
 Reference config params in steps: `{CP[Username]}`, `{CP[Password]}`.
+
+## Conditional steps — `ControlFlowItemV2` for optional elements
+
+Wrap a step in an `If` block when the element may or may not be present (cookie banners, leftover tabs, optional popups). **Works reliably only when the module-level selector can cleanly miss** — i.e. add a tight `Url=https://host.tld*` to the module so the document match returns a clean no-match instead of hard-failing.
+
+```json
+{
+  "$type": "ControlFlowItemV2",
+  "statementTypeV2": "If",
+  "id": "<ULID>",
+  "name": "If cookie banner shown",
+  "disabled": false,
+  "condition": {
+    "id": "<ULID>",
+    "name": "Condition",
+    "disabled": false,
+    "items": [
+      {
+        "$type": "TestStepV2",
+        "id": "<ULID>",
+        "name": "Accept Cookies visible?",
+        "moduleReference": { "id": "<pageModuleId>", "metadata": {...} },
+        "testStepValues": [{
+          "id": "<ULID>",
+          "name": "Accept Cookies",
+          "value": "True",
+          "actionMode": "Verify",
+          "actionProperty": "Visible",
+          "dataType": "String",
+          "operator": "Equals",
+          "moduleAttributeReference": { "id": "<attrId>", "moduleId": "<pageModuleId>", "metadata": {...} },
+          "subValues": [],
+          "disabled": false
+        }]
+      }
+    ]
+  },
+  "conditionPassed": {
+    "id": "<ULID>",
+    "name": "Then",
+    "disabled": false,
+    "items": [ /* the original Click step */ ]
+  }
+}
+```
+
+Top-level keys: `$type`, `statementTypeV2` (`"If"`), `condition` (inline folder), `conditionPassed` (inline folder), `id`, `name`, `disabled`. No `conditionFailed` — just omit and nothing runs on the false branch.
+
+Typical uses that have been verified in production:
+- Cookie banner (OneTrust `#onetrust-accept-btn-handler`) — condition: Verify `Accept Cookies` Visible=True
+- Leftover browser tab cleanup — condition: Verify a known nav element Visible=True; then: `CloseBrowser Title="*<AppName>*"`
+
+## Debugging a failed run
+
+1. `playlists results <runId>` returns only `<failure />`. No step-level logs exist via the Playlists v2 API.
+2. Logs are stored in Azure Blob and fetched by the Portal via `/{spaceId}/_e2g/api/executions/{executionId}/units/{unitId}/attachments`, which returns SAS-signed URLs like:
+   ```
+   https://e2gweuprod001resblobs.blob.core.windows.net/<tenant-slug>/<spaceId>/<executionId>/<unitId>/logs?sv=…&se=…&sr=b&sp=r&sig=…
+   ```
+   SAS TTL ≈ 30 min. The blob GET takes **no Authorization header** — the SAS is the entire auth. Also available on the same endpoint: `TBoxResults.tas`, `TestSteps.json`, `Recording.mp4`, `junit_result_*.xml`.
+3. The `Tricentis_Cloud_API` client app this CLI uses is **403'd** on that attachments endpoint today (no E2G role). Workarounds:
+   - Grant the app E2G-read access (admin change on the tenant).
+   - Copy the SAS URL from the Portal DevTools Network tab and `curl` it.
+   - Re-run locally on an E2G agent: the same log mirrors at `C:\Users\<user>\AppData\Local\Temp\E2G\<runUuid>\…`.
+3. Common error mapping:
+
+   | TBox message | Likely cause | Fix |
+   |--------------|-------------|-----|
+   | `UnestablishedConnectionException` at CloseBrowser | No Chrome running on agent | Remove the cleanup step, or wrap in `If` + narrow `Title` |
+   | `The Browser could not be found` | Tricentis Chrome extension not attached | Install/enable extension in agent's Chrome profile — not a test fix |
+   | `More than one matching tab was found` | Agent shares user's Chrome; multiple tabs match | Add `Url=https://<host>*` TechnicalId at module level |
+   | `Could not find HtmlDocument … Title: <pattern>` | Module-level selector doesn't match | Tighten/fix `Title`; add `Url` for host-scoped match |
+   | `Could not find Link '…'` | Element locator ambiguous or DOM changed | Re-check via Playwright `browser_evaluate` + uniqueness count |
 
 ## Creation workflow
 

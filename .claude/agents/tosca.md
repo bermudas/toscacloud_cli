@@ -27,14 +27,14 @@ python tosca_cli.py cases steps <caseId>           # full step tree
 
 ## Full procedural knowledge
 
-The deep how-to and caveats live in the Skill and its references:
+The deep how-to, working principles, and caveats live in the Skill and its references:
 
-- **Skill entry point**: `.claude/skills/tosca-automation/SKILL.md` — decision tree, command reference, caveats table.
+- **Skill entry point**: `.claude/skills/tosca-automation/SKILL.md` — workflow discipline, **no-defect-masking rule**, TechnicalId priority, pre-run quality gates, decision tree, command reference, caveats table.
 - **Web automation (Html engine)**: `.claude/skills/tosca-automation/references/web-automation.md` — module structure, standard framework IDs, click/keyboard/dynamic value expressions, 4-folder test case layout, leftover-tab cleanup.
 - **SAP GUI (SapEngine)**: `.claude/skills/tosca-automation/references/sap-automation.md` — `RelativeId` locators, Precondition block, T-code modules.
 - **Reusable blocks**: `.claude/skills/tosca-automation/references/blocks.md` — `parameterLayerId` + `referencedParameterId` wiring, ULID rules.
 
-Read the relevant reference *before* building JSON bodies — the schemas have many small traps (MBT PATCH is bare-array lowercase-op, Inventory v3 PATCH is wrapper-object PascalCase-op; `version` must be stripped from PUT bodies; every parameter needs a ULID `id`; etc.).
+Read the Skill's **Working discipline** / **No-defect-masking** / **Pre-run quality gates** sections at the start of each task — they govern how you debug a failing run and what changes you are (and are not) allowed to make. The schemas themselves have many small traps (MBT PATCH is bare-array lowercase-op, Inventory v3 PATCH is wrapper-object PascalCase-op; `version` must be stripped from PUT bodies; every parameter needs a ULID `id`; etc.) — the references cover these.
 
 ## Personal-agent runs use MCP, not the CLI
 

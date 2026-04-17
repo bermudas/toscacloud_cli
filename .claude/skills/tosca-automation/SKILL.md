@@ -32,6 +32,81 @@ The MBT API has no list endpoint. Use Inventory as the discovery layer:
 3. `cases get <id> --json` + `cases steps <id> --json` — ground truth for step composition, module IDs, attribute refs, config params
 4. Use that JSON as the template when creating or patching similar cases
 
+## Workflow discipline — one artifact at a time
+
+Work sequentially, not in batches. Each build cycle is a complete loop:
+
+1. **Discover** — `inventory search` → read an existing similar artifact (`cases steps --json` / `modules get --json`) as ground truth.
+2. **Explore** — use Playwright MCP (web) or read similar existing modules (SAP) to confirm element identity **before** writing JSON. Never commit a module whose locator matches >1 element — verify via `browser_evaluate` that the count is exactly 1.
+3. **Build** — module → test case → placement, using fresh ULIDs where required (`parameterLayerId`, `businessParameter.id`, block-ref `parameters[].id`).
+4. **Run** — personal agent via MCP for iterative debug, shared agent via CLI for CI/scheduled runs.
+5. **Inspect** — on failure, read the exact TBox message via `GetFailedTestSteps` (MCP) or `playlists logs` (CLI). Classify the failure (see next section) before changing anything.
+6. **Fix** — minimum-diff change: patch the offending module/step, not the whole case.
+7. **Validate** — re-run and confirm the step that previously failed now passes. Don't move on until green (or the failure is a documented application defect).
+8. **Report** — IDs (entityId / moduleId / playlistId), folder placement, any remaining gaps.
+
+Don't batch: don't build 5 cases and then run them together. Build one, run it, fix it, then start the next.
+
+## No-defect-masking rule
+
+When a run fails, classify BEFORE changing anything:
+
+| Failure type | Typical signal | Permitted action |
+|---|---|---|
+| **Infrastructure** | `Could not find Link ...`, `More than one matching tab`, stale `SelfHealingData`, extension not attached, timing | Fix the TechnicalId, tighten module-level `Url`/`Title`, add a `Wait`, fix the agent environment. Re-run. |
+| **Application defect — isolated** | One `Verify` step fails; the rest of the flow still executes meaningfully | Keep the `Verify` step. Note the defect in the step `description` or a tracker link; raise the bug. **Do not** delete or weaken the assertion. |
+| **Application defect — blocks flow** | The product bug prevents the core path (popup never opens, login rejected on valid creds) | Let the test fail. A red run is the correct regression signal for a real bug. |
+
+**Forbidden — regardless of reasoning:**
+- Removing a `Verify` step to make the run green.
+- Changing `actionMode: Verify` + `actionProperty: "Visible"`/`"InnerText"` to a weaker form (dropping `actionProperty` so the step just interacts).
+- Deleting an attribute from a module so a failing lookup stops happening.
+- Setting `disabled: true` on a step that catches a genuine product bug.
+- Wrapping a failing `Verify` in `ControlFlowItemV2 If` so the test silently skips the bug.
+- The **re-scoping trap**: concluding "this assertion belongs in a different test case" and removing it from the current one. If a step belonged in this case when it was written, it belongs there now.
+
+The only legitimate way to keep a run green while a known product bug exists is to raise the bug and either leave the test failing or set `disabled: true` with a description linking to the tracker. Masking a defect creates false confidence and defeats the regression suite.
+
+## TechnicalId priority (Html engine)
+
+When picking locator parameters for a new Html module attribute, prefer higher-rank options first. Stability beats cleverness — avoid framework-generated class names and long absolute XPaths.
+
+1. **`Tag` + unique `Title`** — stable, locale-independent. Use when the target has a meaningful `title=""`.
+2. **`Tag: INPUT` + `Name`** — first-choice locator for form fields.
+3. **`Tag` + `InnerText`** — clickable buttons/links with short, unique, stable, locale-appropriate text. Remember `InnerText` matches the full `textContent` exactly, including nested children, and is case-sensitive (so it differs from CSS `text-transform: uppercase` rendering).
+4. **`Tag` + `HREF` + `ClassName`** — nav links. `HREF` must be absolute; `ClassName` discriminates between duplicated mobile/desktop/dropdown copies of the same link.
+5. **`Tag` + `ClassName`** — last resort. Prefer semantic BEM-style class names; avoid framework-generated hashes like `css-xyz123`.
+
+`Id` is silently ignored by the Html engine — never rely on it. After picking a candidate, run a uniqueness check via Playwright MCP:
+
+```javascript
+document.querySelectorAll('<your css>').length   // MUST be 1
+```
+
+If >1, add another discriminator before saving the module. TOSCA will NOT warn you at save time — the ambiguity only surfaces at runtime as `Could not find Link '...'` or `More than one matching ...`.
+
+## Pre-run quality gates
+
+Before triggering a run, confirm:
+
+- [ ] Module has root-level `Engine: Html` (or `SapEngine`) configuration parameter.
+- [ ] Every `TestStepFolderReferenceV2` has a fresh ULID `parameterLayerId`.
+- [ ] Every parameter value entry has `referencedParameterId` pointing to a real `businessParameter.id` on the block.
+- [ ] `version` field stripped from PUT bodies (the CLI does this automatically).
+- [ ] Each attribute locator matches exactly one element on the live page (Playwright MCP uniqueness check).
+- [ ] Precondition starts with `OpenUrl` (all 3 params: `Url`, `UseActiveTab=False`, `ForcePageSwitch=True`) and a `Wait` step for SPAs.
+- [ ] Leftover-tab handling: on workstation agents that share the user's Chrome, cleanup is wrapped in `ControlFlowItemV2 If` with a narrow `Title="*<AppName>*"` — never an unconditional `CloseBrowser Title="*"`.
+- [ ] Local Runner preflight done (extension enabled in target browser, browser maximized) for personal-agent runs.
+
+## Declarative execution
+
+Act, don't ask. Once the user has approved a task ("build a test for flow X"), execute the full discover → build → place → run → inspect loop without asking for permission between steps. State what you are doing, not what you propose to do.
+
+- ✗ "Shall I create the module first or the test case?"
+- ✓ "Creating the module now." (then does it)
+
+Only pause for explicit confirmation on irreversible actions: `delete-folder`, `delete-block`, `--force`, overwriting a test case whose current version you haven't inspected.
+
 ## Decision tree
 
 | Goal | First action |

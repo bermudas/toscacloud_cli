@@ -293,6 +293,10 @@ class ToscaClient:
         """Simulations API v1."""
         return f"{self.tenant_url}/{self.space_id}/_simulations/api/v1/{path.lstrip('/')}"
 
+    def e2g_url(self, path: str) -> str:
+        """E2G (Elastic Execution Grid) API – execution units, attachments, agent logs."""
+        return f"{self.tenant_url}/{self.space_id}/_e2g/api/{path.lstrip('/')}"
+
     # ------------------------------------------------------------------
     # Identity API
     # ------------------------------------------------------------------
@@ -362,8 +366,10 @@ class ToscaClient:
         """
         PUT /{spaceId}/_mbt/api/v2/builder/testCases/{id}  (→ 204)
         Body: full TestCaseV2 object.
+        Automatically strips the read-only 'version' field from the body before sending.
         """
-        self.put(self.mbt(f"testCases/{case_id}"), case_body)
+        body = {k: v for k, v in case_body.items() if k != "version"}
+        self.put(self.mbt(f"testCases/{case_id}"), body)
 
     def patch_case(self, case_id: str, operations: list) -> None:
         """
@@ -405,9 +411,11 @@ class ToscaClient:
         """
         PUT /{spaceId}/_mbt/api/v2/builder/modules/{id}
         Full replacement of a module — body must include id, name, attributes[].
+        Automatically strips the read-only 'version' field from the body before sending.
         Returns updated ModuleV2.
         """
-        result = self.put(self.mbt(f"modules/{module_id}"), body)
+        cleaned = {k: v for k, v in body.items() if k != "version"}
+        result = self.put(self.mbt(f"modules/{module_id}"), cleaned)
         return result if isinstance(result, dict) else {}
 
     def delete_module(self, module_id: str) -> None:
@@ -628,6 +636,42 @@ class ToscaClient:
         if isinstance(result, list):
             return result
         return result.get("items", [])
+
+    # ------------------------------------------------------------------
+    # E2G API – execution units, attachments, agent logs
+    # ------------------------------------------------------------------
+
+    def get_execution(self, execution_id: str) -> dict:
+        """
+        GET /{spaceId}/_e2g/api/executions/{executionId}
+        Returns ExecutionV1 { id, name, items: [UnitV1{ id, name, runner, state, ... }],
+                              executionMode, state, createdAt, ... }.
+        executionId comes from PlaylistRunV1.executionId — NOT the playlist run's own id.
+        """
+        result = self.get(self.e2g_url(f"executions/{execution_id}"))
+        return result if isinstance(result, dict) else {}
+
+    def list_unit_attachments(self, execution_id: str, unit_id: str) -> list:
+        """
+        GET /{spaceId}/_e2g/api/executions/{executionId}/units/{unitId}/attachments
+        Returns [{ name, fileExtension, contentDownloadUri, appendUri, ... }].
+        contentDownloadUri is a SAS-signed Azure Blob URL (TTL ~30 min, no Authorization header needed).
+        Standard names: 'logs' (txt), 'JUnit' (xml), 'TBoxResults' (tas), 'TestSteps' (json),
+        'Recording' (mp4 — only when recorded).
+        """
+        result = self.get(self.e2g_url(f"executions/{execution_id}/units/{unit_id}/attachments"))
+        return result if isinstance(result, list) else []
+
+    def download_blob(self, sas_url: str) -> bytes:
+        """
+        GET <sas_url> with NO Authorization header — the SAS signature is the auth.
+        Returns the raw blob content.
+        """
+        with httpx.Client(timeout=self.timeout, verify=self.verify_ssl) as c:
+            resp = c.get(sas_url)
+            if resp.status_code >= 400:
+                raise ToscaError(resp.status_code, resp.text[:600])
+            return resp.content
 
     # ------------------------------------------------------------------
     # Inventory API v3
@@ -2131,6 +2175,133 @@ def playlists_results(
         return
 
     _print_run_results(client, run_id)
+
+
+def _resolve_execution_id(client: ToscaClient, run_id: str, is_execution_id: bool) -> str:
+    """Return an E2G executionId. If is_execution_id is False, look up the playlist run
+    and read its `executionId` field — that is the ID E2G keys on (NOT the run's own id)."""
+    if is_execution_id:
+        return run_id
+    try:
+        status = client.get_run_status(run_id)
+    except ToscaError as e:
+        _exit_err(f"Could not look up playlist run {run_id}: {e}")
+    exec_id = status.get("executionId", "")
+    if not exec_id:
+        _exit_err(f"Playlist run {run_id} has no executionId yet (state={status.get('state')}).")
+    return exec_id
+
+
+@playlists_app.command("logs")
+def playlists_logs(
+    run_id:          str           = typer.Argument(..., help="Playlist run Id (default) or E2G execution Id with -e"),
+    is_execution_id: bool          = typer.Option(False, "--execution-id", "-e",
+                                                  help="Treat the input as an E2G executionId already"),
+    save_dir:        Optional[str] = typer.Option(None, "--save", help="Save all attachments under this directory"),
+    quiet:           bool          = typer.Option(False, "--quiet", "-q",
+                                                  help="Do not print log content (use with --save)"),
+):
+    """Download per-unit agent logs (and optionally all attachments) for a playlist run.
+
+    Walks: PlaylistRun.executionId → /_e2g/api/executions/{id} → units[] →
+    /units/{unitId}/attachments → SAS-signed Azure Blob downloads (no auth).
+    """
+    client = ToscaClient()
+    exec_id = _resolve_execution_id(client, run_id, is_execution_id)
+    try:
+        execution = client.get_execution(exec_id)
+    except ToscaError as e:
+        _exit_err(f"GET /_e2g/api/executions/{exec_id} failed: {e}")
+
+    units = execution.get("items", [])
+    if not units:
+        console.print(f"[yellow]No units in execution {exec_id}[/yellow]")
+        return
+
+    out_root = Path(save_dir) if save_dir else None
+    for unit in units:
+        uid     = unit.get("id", "")
+        uname   = unit.get("name", "")
+        ustate  = unit.get("state", "")
+        console.print(Panel.fit(f"[bold]{uname}[/bold]\n"
+                                f"unit={uid}  state={ustate}  agent={unit.get('assignedAgentId','')}",
+                                border_style="cyan"))
+        try:
+            attachments = client.list_unit_attachments(exec_id, uid)
+        except ToscaError as e:
+            console.print(f"[red]list attachments failed: {e}[/red]")
+            continue
+
+        for att in attachments:
+            name = att.get("name", "")
+            ext  = att.get("fileExtension", "")
+            url  = att.get("contentDownloadUri", "")
+            if not url:
+                continue
+            try:
+                blob = client.download_blob(url)
+            except ToscaError as e:
+                console.print(f"[red]download {name}.{ext} failed: {e}[/red]")
+                continue
+
+            if out_root is not None:
+                target = out_root / exec_id / uid / f"{name}.{ext}"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(blob)
+                console.print(f"  [green]saved[/green] {target}  ({len(blob)} bytes)")
+
+            if not quiet and name == "logs":
+                console.print(f"\n[dim]----- {name}.{ext} ({len(blob)} bytes) -----[/dim]")
+                try:
+                    console.print(blob.decode("utf-8", errors="replace"))
+                except Exception:
+                    console.print(f"[dim]<binary {len(blob)} bytes>[/dim]")
+
+
+@playlists_app.command("attachments")
+def playlists_attachments(
+    run_id:          str  = typer.Argument(..., help="Playlist run Id (default) or E2G execution Id with -e"),
+    is_execution_id: bool = typer.Option(False, "--execution-id", "-e",
+                                         help="Treat the input as an E2G executionId already"),
+    as_json:         bool = typer.Option(False, "--json", help="Raw JSON output (one record per unit)"),
+):
+    """List attachments (logs.txt, TBoxResults.tas, JUnit.xml, Recording.mp4, …) per unit
+    with their SAS-signed download URLs (TTL ~30 min, valid without auth header)."""
+    client = ToscaClient()
+    exec_id = _resolve_execution_id(client, run_id, is_execution_id)
+    try:
+        execution = client.get_execution(exec_id)
+    except ToscaError as e:
+        _exit_err(f"GET /_e2g/api/executions/{exec_id} failed: {e}")
+
+    payload = []
+    for unit in execution.get("items", []):
+        uid = unit.get("id", "")
+        try:
+            attachments = client.list_unit_attachments(exec_id, uid)
+        except ToscaError as e:
+            attachments = [{"error": str(e)}]
+        payload.append({
+            "unitId":      uid,
+            "name":        unit.get("name", ""),
+            "state":       unit.get("state", ""),
+            "attachments": attachments,
+        })
+
+    if as_json:
+        _output_json(payload)
+        return
+
+    for entry in payload:
+        console.print(Panel.fit(f"[bold]{entry['name']}[/bold]\n"
+                                f"unit={entry['unitId']}  state={entry['state']}",
+                                border_style="cyan"))
+        rows = [
+            [a.get("name", ""), a.get("fileExtension", ""),
+             (a.get("contentDownloadUri", "") or "")[:90] + "…"]
+            for a in entry["attachments"]
+        ]
+        console.print(_table("Attachments", ["Name", "Ext", "SAS URL (truncated)"], rows))
 
 
 @playlists_app.command("tc-runs")

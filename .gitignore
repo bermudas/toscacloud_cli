@@ -29,3 +29,5 @@ junit-results.xml
 
 # macOS
 .DS_Store
+
+.playwright-mcp/*

@@ -1,12 +1,10 @@
 {
-  "servers": {
-    "playwright_mcp": {
-			"type": "stdio",
-			"command": "npx",
-			"args": [
-				"@playwright/mcp@latest"
-			]
-		},"ToscaCloudMcpServer": {
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    },"ToscaCloudMcpServer": {
       "command": "npx",
       "args": [
         "-y",
@@ -21,6 +19,5 @@
         "{\"scope\":\"tta\"}"
       ]
     }
-
+  }
 }
-      }

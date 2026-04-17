@@ -66,6 +66,20 @@ User wants to RUN tests?
   → playlists list → pick playlist → playlists run <id> --wait
   → playlists results <runId> on completion
 
+User wants to DEBUG a failed playlist run?
+  → playlists results <runId> only gives `<failure />` — useless on its own
+  → playlists logs <runId>             — full TBox transcript per unit (start with this)
+    playlists logs <runId> --save ./   — dump logs.txt + JUnit.xml + TBoxResults.tas + TestSteps.json
+    playlists attachments <runId>      — list SAS URLs (Recording.mp4 included when present)
+    The log names the failing step and carries the .NET stack trace; the local E2G agent
+    mirror (`C:\Users\<user>\AppData\Local\Temp\E2G\…`) is a backup with no SAS expiry.
+  → common TBox error → diagnosis:
+      • "UnestablishedConnectionException" at CloseBrowser → no Chrome running; remove or wrap CloseBrowser
+      • "The Browser could not be found" → Tricentis Chrome extension not attached; agent/env fix
+      • "More than one matching tab" → narrow module-level Title or add a Url TechnicalId
+      • "Could not find HtmlDocument … Title:*" → module-level selector doesn't match the tab; tighten Title/Url
+      • "Could not find Link '…'" → element locator ambiguous or stale; re-check via Playwright
+
 User wants to MOVE/ORGANIZE?
   → inventory move <type> <entityId> --folder-id <folderEntityId>
   → inventory create-folder / rename-folder / delete-folder for structure
@@ -133,6 +147,10 @@ python tosca_cli.py playlists list
 python tosca_cli.py playlists run <id> --wait [--param-overrides '[...]']
 python tosca_cli.py playlists results <runId>
 python tosca_cli.py playlists list-runs
+python tosca_cli.py playlists logs <runId>                  # per-unit agent logs (TBox transcript + .NET stack traces)
+python tosca_cli.py playlists logs <runId> --save ./logs    # also save logs.txt, JUnit.xml, TBoxResults.tas, TestSteps.json per unit
+python tosca_cli.py playlists logs <execId> -e --quiet      # input is already an executionId; suppress stdout
+python tosca_cli.py playlists attachments <runId>           # SAS URLs per unit (no download)
 
 # Folders and organization
 python tosca_cli.py inventory move testCase <entityId> --folder-id <folderEntityId>
@@ -181,7 +199,18 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"   # re
 | `InnerText` TechnicalId matches `textContent`, NOT CSS-rendered text | TOSCA's `InnerText` parameter is matched against the raw DOM `textContent`, not the CSS-rendered `innerText`. Elements styled with `text-transform: uppercase` have different values: e.g. `textContent="Accept All"` vs `innerText="ACCEPT ALL"`. Always use `textContent` (title/sentence case) as the `InnerText` value. Verify via `browser_evaluate`: `document.querySelector('...').textContent.trim()`. |
 | `Id` is NOT a valid Html engine TechnicalId parameter | The Html engine only recognises `Tag`, `InnerText`, `HREF`, `ClassName` (and `Name`, `Value`, `Type` for inputs) as `TechnicalId` parameters. `Id` is silently ignored at runtime, effectively removing that locator constraint. To target an element by its HTML `id`, there is no direct parameter — use `Tag` + `InnerText` or `Tag` + `ClassName` instead. |
 | `HREF` TechnicalId must be absolute URL | TOSCA resolves the `href` DOM property (absolute URL) when matching the `HREF` TechnicalId — it does NOT use `getAttribute('href')` (relative). If an `<a>` has `href="/services"`, the TOSCA parameter must be `HREF: https://www.epam.com/services`. Using `/services` (relative) causes a mismatch and the element is never found. Best practice: omit `HREF` entirely when `Tag + InnerText + ClassName` already uniquely identifies the element. |
-| `ControlFlowItemV2` condition hard-fails when element is not found | If a Verify step inside a `ControlFlowItemV2` `condition` block cannot find its element, TOSCA hard-fails the entire test rather than evaluating the condition as `false`. Only use `ControlFlowItemV2` for elements that are guaranteed to be present but in varying states. For truly optional elements (e.g. a cookie banner that only appears on first visit), use an unconditional step instead — since `CloseBrowser` + `OpenUrl` always produces a fresh browser, the banner is always present. |
+| `ControlFlowItemV2` condition evaluates cleanly only when the module-level identifier matches | A Verify step inside a `ControlFlowItemV2.condition` evaluates `false` when the element is present-but-hidden, and hard-fails when the element's *document* (HtmlDocument / Window) can't be found. Make the module-level selector tight enough to produce a clean miss (e.g. `Url=https://host.tld*` on Html modules) — then wrapping optional steps in If/Then is safe. Used successfully for cookie banners and leftover-tab cleanup. |
+| MBT test case ID = Inventory `entityId` | `cases get`/`steps`/`update` accept only the Inventory `entityId` (e.g. `WcucATcH0UKiiL9aoQsJyg`). Both the playlist item's `id` field and the inventory record's `attributes.surrogate` UUID return HTTP 404 against MBT. Resolve via `inventory search … --type TestCase --json` → `id.entityId`. |
+| Module PUT rejects `version` field | Just like block PUT. The CLI's `update_module` strips it automatically (fixed 2026-04); when building module bodies by hand, drop `version` from the dict before PUT. |
+| Html module-level `Title="*"` is too broad on shared browsers | When the agent reuses the user's personal Chrome (tabs from other apps open), `Title=*` causes _"More than one matching tab"_ on any step. Fix: add a module-level `Url` TechnicalId limited to the host (e.g. `https://www.epam.com*`) so document matching picks only the test tab. |
+| `"The Browser could not be found"` — environment, not test | This TBox message means the Tricentis Chrome extension is not attached to the Chrome instance driving the tab. OpenUrl can succeed (the tab opens), but subsequent actions have no extension bridge. Fix on the agent: install/enable the Tricentis Automation Extension in the Chrome profile the agent launches (or configure a dedicated profile). No test-case change resolves this. |
+| `CloseBrowser Title="*"` can fail with `UnestablishedConnectionException` | On a fresh grid agent with no Chrome running, an unguarded `CloseBrowser` as the first Precondition step times out (~10 s) and aborts the case. Options: (a) omit `CloseBrowser` cleanup on grid agents, (b) on workstation agents that share the user's Chrome, wrap it in a `ControlFlowItemV2 If` whose condition verifies that a known tab element is visible, and narrow the `Title` glob (e.g. `*EPAM*`) so you only close the tabs you created. |
+| Playlists v2 has no step-level log endpoint, but E2G does | `playlists results <runId>` only returns `<failure />`. Use `playlists logs <runId>` instead — it walks `/_e2g/api/executions/{executionId}` units → `/units/{unitId}/attachments` → SAS-signed blob downloads. Returns the full TBox transcript per unit (step names, durations, .NET stack traces). The local E2G agent mirror at `C:\Users\<user>\AppData\Local\Temp\E2G\…` is a backup with no SAS expiry. |
+| `playlistRun.id` ≠ E2G `executionId` | The `_e2g/api/executions/{id}` endpoint keys on `PlaylistRunV1.executionId` (e.g. `7041def3-…`), not the playlist run's own `id` (e.g. `0d0e40dc-…`). Passing the run id 404s with "Execution not found". The CLI's `playlists logs` and `playlists attachments` resolve this via `playlists status` automatically; pass `--execution-id / -e` to skip the lookup if you already have the executionId (e.g. when chaining from MCP `GetRecentRuns`). |
+| E2G attachment names | `list_unit_attachments` returns records with `name` ∈ {`logs`, `JUnit`, `TBoxResults`, `TestSteps`, `Recording`} and a separate `fileExtension` (`txt`/`xml`/`tas`/`json`/`mp4`). `Recording` is only present when `playlist.uploadRecordingsOnSuccess` triggered a capture. |
+| SAS-signed blob GET must NOT include Authorization | The `contentDownloadUri` is a fully signed Azure Blob URL — adding `Authorization: Bearer …` causes Azure to 403 because the SAS signature *is* the auth. The CLI's `download_blob()` strips headers; if you call the URL by hand from `playlists attachments --json`, just `curl` the URL plain. SAS TTL ≈ 30 min; re-list attachments to refresh. |
+| Module `SelfHealingData` pins a specific past page | Scanned modules carry a `SelfHealingData` steering param with the Title/URL of the page at scan time. If the module is reused for a different flow (e.g. scanned on `/about` then reused on `/`), the old hints can interfere with document matching. When repurposing, drop the `SelfHealingData` entry entirely — the module still works via its TechnicalId params. |
+| Html module steering defaults that actually work | Align with scanned modules that pass in prod: `AllowedAriaControls="button; checkbox; combobox; link; listbox; menuitem; menuitemcheckbox; menuitemradio; option; radio; scrollbar; slider; spinbutton; switch; tab; textbox; treeitem"`, `EnableSlotContentHandling="False"`, `IgnoreInvisibleHtmlElements="True"`. An empty `AllowedAriaControls` or `EnableSlotContentHandling=True` can cause erratic element resolution. |
 | OpenUrl needs 3 params, not just Url | Always include `UseActiveTab=False` and `ForcePageSwitch=True` alongside `Url` in an OpenUrl step — see Web Automation section for full IDs. Omitting them can cause browser tab/window handling issues. |
 | Add a `Wait` step after OpenUrl in Precondition for SPAs | Single-page apps (React, Angular, etc.) don't finish rendering immediately after navigation. Without an explicit `Wait` (3000–5000 ms) after `OpenUrl`, TOSCA will fail to find the first interactive element — humans will always add this manually. Include a `Timing.Wait Duration=5000` step at the end of the Precondition folder for any SPA target. |
 | MBT PATCH does not support deep JSON pointer paths | `cases patch` with a path like `/testCaseItems/1/items/2/testStepValues/0/value` silently succeeds (204) but makes no change. For step-level edits, use a full `cases update <id> --json-file` (PUT) instead — fetch the current JSON, mutate in Python, remove `version`, then PUT. |

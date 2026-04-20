@@ -30,7 +30,7 @@ The MBT API has no general list endpoint; use Inventory for user-created artifac
 1. `inventory search "<name>" --type TestCase` — find test case IDs
 2. `inventory search "<name>" --type Module` — find **user-created** module IDs (built-in Standard modules do not appear here)
 3. `cases get <id> --json` + `cases steps <id> --json` — ground truth for step composition, module IDs, attribute refs, config params
-4. **Standard modules** (OpenUrl, CloseBrowser, Wait, Execute JavaScript, Verify JavaScript Result, HTTP modules, Database modules, file modules, SAP T-code, …) are bundled with the agent and referenced by well-known GUID + `packageReference: {id, type: "Standard"}`. List them via `GET /_mbt/api/v2/builder/packages` — full walkthrough and Html-package GUID table in [standard-modules.md](references/standard-modules.md). Do this **before** building a custom wrapper around functionality the platform already ships.
+4. **Standard modules** (engine-bundled — OpenUrl, CloseBrowser, Wait, Execute JavaScript, HTTP, DB, file, email, T-code, etc.) do NOT appear in `inventory search`. Discover via `GET /_mbt/api/v2/builder/packages`. **Before** building a custom wrapper for any common capability, check there first — see [standard-modules.md](references/standard-modules.md).
 5. Use the discovered JSON as the template when creating or patching similar cases.
 
 ## Workflow discipline — one artifact at a time
@@ -39,7 +39,7 @@ Work sequentially, not in batches. Each build cycle is a complete loop:
 
 1. **Discover** — `inventory search` → read an existing similar artifact (`cases steps --json` / `modules get --json`) as ground truth.
 2. **Explore** — use Playwright MCP (web) or read similar existing modules (SAP) to confirm element identity **before** writing JSON. Never commit a module whose locator matches >1 element — verify via `browser_evaluate` that the count is exactly 1.
-3. **Build** — module → test case → placement, using fresh ULIDs where required (`parameterLayerId`, `businessParameter.id`, block-ref `parameters[].id`).
+3. **Build** — module → test case → placement, using fresh ULIDs where required (`parameterLayerId`, `businessParameter.id`, block-ref `parameters[].id`). **Before finalizing identification choices, action modes, or folder structure**, reconcile against [best-practices.md](references/best-practices.md) (condensed from the 10 official Tricentis Best Practices KBs) — it is the "whether/why" reference that complements the mechanical how-to guides.
 4. **Run** — personal agent via MCP for iterative debug, shared agent via CLI for CI/scheduled runs.
 5. **Inspect** — on failure, read the exact TBox message via `GetFailedTestSteps` (MCP) or `playlists logs` (CLI). Classify the failure (see next section) before changing anything.
 6. **Fix** — minimum-diff change: patch the offending module/step, not the whole case.
@@ -88,7 +88,7 @@ If >1, add another discriminator before saving the module. TOSCA will NOT warn y
 
 ## Pre-run quality gates
 
-Before triggering a run, confirm:
+Before triggering a run, confirm these **mechanical** checks here, and walk through the **conformance** checklist in [best-practices.md](references/best-practices.md) (naming, TestCase structure, identification priority, forbidden `{CLICK}`/`{SENDKEYS}` patterns, etc.):
 
 - [ ] Module has root-level `Engine: Html` (or `SapEngine`) configuration parameter.
 - [ ] Every `TestStepFolderReferenceV2` has a fresh ULID `parameterLayerId`.
@@ -98,6 +98,7 @@ Before triggering a run, confirm:
 - [ ] Precondition starts with `OpenUrl` (all 3 params: `Url`, `UseActiveTab=False`, `ForcePageSwitch=True`) and a `Wait` step for SPAs.
 - [ ] Leftover-tab handling: on workstation agents that share the user's Chrome, cleanup is wrapped in `ControlFlowItemV2 If` with a narrow `Title="*<AppName>*"` — never an unconditional `CloseBrowser Title="*"`.
 - [ ] Local Runner preflight done (extension enabled in target browser, browser maximized) for personal-agent runs.
+- [ ] Conformance walkthrough completed — see [best-practices.md](references/best-practices.md) "Agent checklist" section.
 
 ## Declarative execution
 
@@ -213,9 +214,9 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | `referencedParameterId` | Each parameter value entry must match a `businessParameter.id` from the block — get IDs via `blocks get <blockId> --json` |
 | `{CP[ParamName]}` syntax | Reference test config params in step values: `{CP[Username]}`, `{CP[Password]}` |
 | ProcessOperations `subValues` | The `Arguments` step uses `actionMode: "Select"` with each CLI arg as a separate item in `subValues[]` — multiple args in one `value` string won't work |
-| Standard modules invisible in `inventory search` | Intentional — built-in Standard modules (OpenUrl, CloseBrowser, Wait, Execute JavaScript, etc.) are not stored as space artifacts. List them via `GET /_mbt/api/v2/builder/packages`; fetch full attribute tree via `packages/{packageId}/modules/{moduleId}`. Attribute GUIDs are stable across tenants — hard-code them. See [standard-modules.md](references/standard-modules.md) |
-| `{SCRIPT[...]}` / `{XP[...]}` dynamic-value expansion | Not registered on Tosca Cloud. Attempts return `No suitable value found for command SCRIPT.` To run JS, use the `Execute JavaScript` / `Verify JavaScript Result` Standard modules |
-| Html scanner blind to body content (not an iframe / not shadow DOM / not CSS-hidden) | The AutomationExtension DOM observer is disabled for the domain (tenant `Disable Ajax Tracer injection on pages` setting, Drupal/React hydration racing, etc.). Module Steering flags won't unblock it. Pivot to `Verify JavaScript Result` — its `SpecialExecutionTask: VerifyJavaScriptResult` dispatch uses CDP `Runtime.evaluate` and bypasses the scanner. Case study in [standard-modules.md](references/standard-modules.md) |
+| Standard modules invisible in `inventory search` | Intentional. Discover via `GET /_mbt/api/v2/builder/packages` + `packages/{pkg}/modules/{moduleId}`. Top-level module GUIDs appear stable; attribute GUIDs are NOT confirmed stable — re-discover per tenant. See [standard-modules.md](references/standard-modules.md) |
+| `{SCRIPT[...]}` / `{XP[...]}` dynamic-value expansion | Not registered on Tosca Cloud. To run JS from a test step, use the `Execute JavaScript` / `Verify JavaScript Result` Standard modules — see [standard-modules.md](references/standard-modules.md) |
+| Html scanner blind to body content (not iframe / not shadow DOM / not CSS-hidden) | Module Steering flags won't fix it. Pivot to `Verify JavaScript Result` (CDP-based, bypasses the scanner). Full diagnostic playbook + anti-patterns in [standard-modules.md](references/standard-modules.md) |
 
 ## ULID generation
 

@@ -127,6 +127,29 @@ Example Link `valueRange` that includes hover:
 "valueRange": ["{CLICK}", "{RIGHTCLICK}", "{MOUSEOVER}"]
 ```
 
+#### Mega-menu hover routing — direct `{MOUSEOVER}` paths can accidentally switch panels
+
+Plain `{MOUSEOVER}` moves the cursor in a **straight line** (default `Jump`/`Smooth`) from its current position to the target's center. On mega-menus where top-level triggers (About / Products / Research / Careers / …) each open their own panel on hover, a straight diagonal line from one top-level trigger to a deep submenu link **crosses other top-level triggers** and swaps the open panel mid-flight — the intended target is no longer visible when the subsequent `{CLICK}` fires, and TBox reports `Link '…' is not steerable. The reason could be that the control is not visible` after a ~10 s timeout.
+
+Two fixes, in order of preference:
+
+1. **Single-step L-path via the advanced `{MOUSE[…]}` form.** Replace the `{MOUSEOVER}` value on the target Link with `{MOUSE[MOUSEOVER][HorizontalFirst]}` (or `[VerticalFirst]` depending on layout). The move goes horizontal-then-vertical (or vice versa) in a single step, keeping the cursor inside the expanded panel's safe rectangle. Requires the Link's `valueRange` to include the exact string.
+
+2. **Explicit waypoint attribute.** If the target element is deep enough that even `HorizontalFirst` crosses a sibling trigger, add a **waypoint Link attribute** to the module — an element on the same-y-row as the top-level trigger, safely inside the opened submenu column — and insert a `MOUSEOVER <waypoint>` step between the panel-opening hover and the target hover:
+
+   ```
+   1. Click <hamburger Menu>
+   2. MOUSEOVER <top-level trigger>            ← opens submenu
+   3. WaitOn <target visible>
+   4. MOUSEOVER <waypoint>                     ← horizontal move inside safe row
+   5. MOUSEOVER <target>                       ← vertical move inside submenu column
+   6. Click <target>
+   ```
+
+   To pick a good waypoint, call `document.querySelectorAll('<trigger-submenu> > li:nth-child(1) > a')` or inspect via Playwright `browser_evaluate` — you want a link whose `getBoundingClientRect().top/bottom` **overlap the top-level trigger's y-range** (same row), so the path from trigger → waypoint is horizontal only. Then the path from waypoint → target is vertical only (both are in the same submenu column). This L-shaped path never crosses another top-level trigger.
+
+Validated against Novartis — see case `Novartis — verify Therapeutic Areas sections` in the Sandbox space. Direct `{MOUSEOVER}` from `About` to `Therapeutic areas` crossed `Products` / `Patients` and closed the About panel; adding a `Board of Directors` waypoint (same y-row as `About`, top of the About submenu column) made the flow deterministic.
+
 ### Keyboard commands (on TextBox / any focusable)
 
 Single key: `{ENTER}` `{RETURN}` `{TAB}` `{ESC}` `{ESCAPE}` `{BACKSPACE}` `{DEL}` `{HOME}` `{END}` `{LEFT}` `{RIGHT}` `{UP}` `{DOWN}` `{INSERT}` `{CLEAR}` `{F1}`–`{F24}` — and modifiers `{SHIFT}` `{CTRL}` `{ALT}` (plus `L`/`R` variants), plus `{CAPSLOCK}` `{NUMLOCK}` `{SCROLLLOCK}` `{PRINT}` `{BREAK}` `{LWIN}` `{RWIN}` `{APPS}`.

@@ -23,6 +23,8 @@ Config lives at `.env` in the project root. Token cache at `./token.json`. Never
 2. **Match IDs carefully** — MBT endpoints want the Inventory `entityId` (e.g. `WcucATcH0UKiiL9aoQsJyg`); the playlist item's `id` and `attributes.surrogate` UUID both 404 against MBT. Always resolve via `inventory search --type TestCase --json` → `id.entityId`.
 3. **Prefer editing existing files** over creating new ones. Don't add features/refactors beyond what the task requires.
 4. **On personal-agent runs, use MCP not the CLI** — the service token is 403'd on private runs (see `.github/copilot-instructions.md` or `CLAUDE.md` for the polling recipe).
+5. **Confirm every write by GET + version bump** — CLI `✓ patched`, HTTP 204, or `{}` only prove the request shape was accepted, NOT that the diff landed. MBT PATCH silently drops unsupported ops (deep JSON-pointer paths, `remove` on array elements, `move`). After every `cases patch` / `cases update` / `modules update` / `blocks update` / `inventory patch`, GET the artifact and assert (a) `version` bumped and (b) the edited field actually changed. If it didn't, fall back to full PUT.
+6. **Read the skill references before mutating** — the standard-modules / web-automation references in `.claude/skills/tosca-automation/references/` list known silent-failure modes (e.g. `"` in JS values, `{MOUSEOVER}` crossing mega-menu triggers, Verify-in-If hard-fails on missing documents). Cross-referencing before you edit saves full re-run cycles.
 
 ## Where detailed guidance lives
 

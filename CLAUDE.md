@@ -27,12 +27,27 @@ Single file, no sub-packages:
 
 ## Key patterns
 
-**Always discover before acting** — the MBT API has no list endpoint. Use Inventory as the discovery layer:
+**Always discover before acting** — the MBT API has no list endpoint for user artifacts; use Inventory for those and `/packages` for engine-bundled Standard modules:
 ```bash
 python tosca_cli.py inventory search "<name>" --type TestCase --json
 python tosca_cli.py cases get --json <caseId>          # ground-truth metadata
 python tosca_cli.py cases steps <caseId>               # step tree with all module/attr IDs
 ```
+
+**Standard modules (OpenUrl, CloseBrowser, Wait, Execute JavaScript, Verify JavaScript Result, DB/HTTP/File/Mail etc.) don't appear in inventory** — they're bundled with the agent. Discover via:
+```python
+# one-liner — requires `source .venv/bin/activate`
+python -c "import sys;sys.path.insert(0,'.');from tosca_cli import ToscaClient;c=ToscaClient();import json;print(json.dumps(c.get(c.mbt('packages')),indent=2))" | less
+# full attribute tree for a specific standard module (replace <pkg> and <moduleGuid>)
+python -c "import sys;sys.path.insert(0,'.');from tosca_cli import ToscaClient;c=ToscaClient();import json;print(json.dumps(c.get(c.mbt('packages/<pkg>/modules/<moduleGuid>')),indent=2))"
+```
+Validated Html-package module GUIDs (appear to be platform constants — the engine's dispatch keys): `OpenUrl=9f8d14b3-7651-4add-bcfe-341a996662cc`, `CloseBrowser=3019e887-48ca-4a7e-8759-79e7762c6152`, **`Execute JavaScript=54f432f6-61ed-4c9a-a7dc-9e3970a08323`**, **`Verify JavaScript Result=a9cc198f-ae01-4665-ac02-5000d6b0c7de`**, `Wait (Timing)=80b7982e-0e10-4bc0-bdf3-6bc04503fd63`. **Attribute GUIDs inside these modules are NOT guaranteed stable across tenants — always re-discover them via `packages/<pkg>/modules/<moduleGuid>` on the target tenant** rather than copying from docs or another project. See `.claude/skills/tosca-automation/references/standard-modules.md` for the full discovery workflow and step-JSON skeleton.
+
+**When the Html scanner is blind to body content** (header findable, body not; `browser_evaluate` confirms element is in the top-level DOM; no iframe / shadow DOM / CSS-hidden ancestor): pivot to `Verify JavaScript Result` instead of iterating Steering params. It dispatches through `SpecialExecutionTask: VerifyJavaScriptResult` (CDP `Runtime.evaluate`), bypassing the AutomationExtension DOM observer. Module-level Steering flags (`IgnoreInvisibleHtmlElements`, `ScrollToFindElement`, `UseWebDriverSteeringExclusively`, `IframeProcessingEnabled`, etc.) do **not** unblock scanner-blindness — the root cause is in the observer injection pipeline (tenant-level `Disable Ajax Tracer injection on pages` setting, or a page hydration race), not in element visibility filtering.
+
+**`{SCRIPT[...]}` / `{XP[...]}` / `{EVAL[...]}` dynamic expressions are not registered** on Tosca Cloud (`No suitable value found for command SCRIPT.`). The only way to run JS from a test step is the standard modules above.
+
+**Do not attempt `OpenUrl("javascript:…")` as a DIY JS-execution hack.** Chrome does accept the navigation and the JS runs, but the resulting tab ends up in a state where TBox can bind the window by Title/URL yet cannot find ANY element inside it (not even `<body>` / `<html>` / `<head>`). Dead end for verification. Use `Verify JavaScript Result`.
 
 **Block IDs** — `inventory search --type Module` returns module entity IDs, not block IDs. Get block IDs from a test case: `cases get --json <caseId>` → `testCaseItems[].reusableTestStepBlockId` where `$type == "TestStepFolderReferenceV2"`.
 
@@ -173,6 +188,8 @@ python tosca_cli.py playlists list
 | `.claude/skills/tosca-automation/references/web-automation.md` | Html engine how-to (module structure, standard module IDs, Playwright discovery, 4-folder pattern) |
 | `.claude/skills/tosca-automation/references/sap-automation.md` | SapEngine how-to (standard module IDs, Precondition block, RelativeId patterns, ControlFlowItemV2) |
 | `.claude/skills/tosca-automation/references/blocks.md` | Reusable blocks deep dive (block↔case wiring, parameterLayerId, ULID rules, extend workflow) |
+| `.claude/skills/tosca-automation/references/standard-modules.md` | Standard modules discovery + Execute/Verify JavaScript reference (Html package GUIDs, full attribute-ID trees, ready-to-paste JSON step skeletons, Drupal-blindness case study) |
+| `.claude/skills/tosca-automation/references/best-practices.md` | Condensed summary of the 10 official Tricentis Best Practices KBs — module identification priority, TestCase structure, forbidden action patterns |
 
 ## Dependencies (requirements.txt)
 

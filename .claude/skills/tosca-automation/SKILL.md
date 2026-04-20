@@ -25,12 +25,13 @@ Use this skill for any task involving the Tricentis TOSCA Cloud REST API or the 
 
 ## Core principle — always discover before acting
 
-The MBT API has no list endpoint. Use Inventory as the discovery layer:
+The MBT API has no general list endpoint; use Inventory for user-created artifacts and `/packages` for built-in modules:
 
 1. `inventory search "<name>" --type TestCase` — find test case IDs
-2. `inventory search "<name>" --type Module` — find module IDs
+2. `inventory search "<name>" --type Module` — find **user-created** module IDs (built-in Standard modules do not appear here)
 3. `cases get <id> --json` + `cases steps <id> --json` — ground truth for step composition, module IDs, attribute refs, config params
-4. Use that JSON as the template when creating or patching similar cases
+4. **Standard modules** (OpenUrl, CloseBrowser, Wait, Execute JavaScript, Verify JavaScript Result, HTTP modules, Database modules, file modules, SAP T-code, …) are bundled with the agent and referenced by well-known GUID + `packageReference: {id, type: "Standard"}`. List them via `GET /_mbt/api/v2/builder/packages` — full walkthrough and Html-package GUID table in [standard-modules.md](references/standard-modules.md). Do this **before** building a custom wrapper around functionality the platform already ships.
+5. Use the discovered JSON as the template when creating or patching similar cases.
 
 ## Workflow discipline — one artifact at a time
 
@@ -120,6 +121,8 @@ Only pause for explicit confirmation on irreversible actions: `delete-folder`, `
 | Export / import | `cases export-tsu --ids "id1,id2" --output file.tsu` / `cases import-tsu --file file.tsu` |
 | Create Web test case | Use Playwright to snapshot the page → discover element locators → create module → create case → see [Web Automation guide](references/web-automation.md) |
 | Create SAP GUI test case | `inventory search "<TCODE>" --type Module` → create/reuse modules → assemble case → see [SAP GUI guide](references/sap-automation.md) |
+| Run JavaScript in the page / read cookie / scroll / CSS query a hydrated SPA / scanner is blind to body content | Use the `Verify JavaScript Result` or `Execute JavaScript` **Standard** module (GUIDs + attribute IDs + ready-to-paste JSON in [standard-modules.md](references/standard-modules.md)). Do NOT reach for `{SCRIPT[...]}` dynamic value — it is not a registered command on Tosca Cloud. Do NOT try to import the Standard subset — it's already on the agent, reachable by GUID |
+| Any functionality the platform probably ships (HTTP, DB query, file, email, clipboard, timing, T-code…) | First `GET /_mbt/api/v2/builder/packages` → find the module → get attribute IDs via `packages/{packageId}/modules/{moduleId}` → hard-code the GUIDs in your generated test step. Writing a custom wrapper is almost always wrong |
 
 ## Key CLI commands
 
@@ -210,6 +213,9 @@ python tosca_cli.py inventory folder-tree --folder-ids "<parentFolderId>"
 | `referencedParameterId` | Each parameter value entry must match a `businessParameter.id` from the block — get IDs via `blocks get <blockId> --json` |
 | `{CP[ParamName]}` syntax | Reference test config params in step values: `{CP[Username]}`, `{CP[Password]}` |
 | ProcessOperations `subValues` | The `Arguments` step uses `actionMode: "Select"` with each CLI arg as a separate item in `subValues[]` — multiple args in one `value` string won't work |
+| Standard modules invisible in `inventory search` | Intentional — built-in Standard modules (OpenUrl, CloseBrowser, Wait, Execute JavaScript, etc.) are not stored as space artifacts. List them via `GET /_mbt/api/v2/builder/packages`; fetch full attribute tree via `packages/{packageId}/modules/{moduleId}`. Attribute GUIDs are stable across tenants — hard-code them. See [standard-modules.md](references/standard-modules.md) |
+| `{SCRIPT[...]}` / `{XP[...]}` dynamic-value expansion | Not registered on Tosca Cloud. Attempts return `No suitable value found for command SCRIPT.` To run JS, use the `Execute JavaScript` / `Verify JavaScript Result` Standard modules |
+| Html scanner blind to body content (not an iframe / not shadow DOM / not CSS-hidden) | The AutomationExtension DOM observer is disabled for the domain (tenant `Disable Ajax Tracer injection on pages` setting, Drupal/React hydration racing, etc.). Module Steering flags won't unblock it. Pivot to `Verify JavaScript Result` — its `SpecialExecutionTask: VerifyJavaScriptResult` dispatch uses CDP `Runtime.evaluate` and bypasses the scanner. Case study in [standard-modules.md](references/standard-modules.md) |
 
 ## ULID generation
 
@@ -252,3 +258,5 @@ For shared/team-agent runs (CI, scheduled jobs, parameter-overridden runs), use 
 - Read [Web Automation (Html engine)](references/web-automation.md) when creating or updating Html engine modules, building web test cases, or using Playwright to discover element locators and class names.
 - Read [SAP GUI Automation (SapEngine)](references/sap-automation.md) when creating or updating SAP GUI modules, assembling SAP test cases, or working with T-codes, RelativeId locators, or the Precondition reusable block.
 - Read [Reusable Blocks](references/blocks.md) when working with reusable test step blocks — extending block parameters, wiring block references into test cases, or debugging `parameterLayerId` / `referencedParameterId` issues.
+- Read [Standard Modules & Execute/Verify JavaScript](references/standard-modules.md) when you need to: run JavaScript in the browser, read cookies / storage / computed styles, work around a scanner that's blind to body content, or use any out-of-the-box platform module (HTTP, DB, file, email, clipboard, timing, T-code). Includes the `/packages` discovery endpoint recipe and the full Html-package GUID table.
+- Read [Best Practices (condensed KB summary)](references/best-practices.md) before finalizing module identification choices, TestCase structure, or TestStep action modes — it compresses the 10 official Tricentis Best Practices articles into a single checklist.

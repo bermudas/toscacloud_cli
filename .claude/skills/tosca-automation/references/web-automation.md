@@ -342,6 +342,38 @@ Typical uses that have been verified in production:
 - Cookie banner (OneTrust `#onetrust-accept-btn-handler`) — condition: Verify `Accept Cookies` Visible=True
 - Leftover browser tab cleanup — condition: Verify a known nav element Visible=True; then: `CloseBrowser Title="*<AppName>*"`
 
+### VJS probe — robust conditional CloseBrowser without a scanned module
+
+When you need to conditionally close the browser but don't have (or don't want to depend on) a scanned Html module for the page, use a **VJS probe** as the `ControlFlowItemV2 If` condition instead of an Html-module Verify:
+
+```json
+{
+  "$type": "ControlFlowItemV2",
+  "statementTypeV2": "If",
+  "name": "If <AppName> tab open – close it",
+  "condition": {
+    "items": [{
+      "$type": "TestStepV2",
+      "name": "Probe – <AppName> tab open?",
+      "moduleReference": { "id": "<VJS-module-GUID>", "packageReference": {"id": "Html", "type": "Standard"}, "metadata": {"engine": "<tenant-engine-value>"} },
+      "testStepValues": [
+        { "name": "UseActiveTab", "value": "False", "actionMode": "Input", "dataType": "String" },
+        { "name": "Title", "value": "*<AppName>*", "actionMode": "Input", "dataType": "String" },
+        { "name": "JavaScript", "value": "return 'present'", "actionMode": "Input", "dataType": "String" },
+        { "name": "Result", "value": "present", "actionMode": "Verify", "dataType": "String", "operator": "Equals" }
+      ]
+    }]
+  },
+  "conditionPassed": {
+    "items": [/* CloseBrowser step */]
+  }
+}
+```
+
+**Why this works:** VJS with `UseActiveTab=False + Title=*<pattern>*` silently returns `""` (empty string) when no matching tab exists, instead of throwing an error like a GUI Html module would. The Result `Verify "present"` then fails → the If condition evaluates false → CloseBrowser is skipped. When a matching tab IS open, the JS runs and returns `"present"` → Verify passes → CloseBrowser executes.
+
+**Advantage over Html-module Verify condition:** no scanned module or page element is needed; works immediately after Teardown closes the browser; handles the "fresh agent, no browser running at all" case cleanly without `UnestablishedConnectionException`.
+
 ## Debugging a failed run
 
 1. `playlists results <runId>` returns only `<failure />`. No step-level logs exist via the Playlists v2 API.

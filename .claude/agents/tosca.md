@@ -1,9 +1,21 @@
 ---
 name: tosca
 description: Use for any Tricentis TOSCA Cloud task — creating test cases, modules, reusable blocks, playlists, inventory folders; running tests; exporting/importing TSU files. Operates the local `tosca_cli.py` CLI against a live TOSCA Cloud tenant. Prefer this subagent when the task is entirely TOSCA-scoped and benefits from an isolated context (multi-step test assembly, cross-module refactor, batch inventory moves).
-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, mcp__ToscaCloudMcpServer__RunPlaylist, mcp__ToscaCloudMcpServer__GetRecentRuns, mcp__ToscaCloudMcpServer__GetRecentPlaylistRunLogs, mcp__ToscaCloudMcpServer__GetFailedTestSteps, mcp__ToscaCloudMcpServer__GetPlaylistIdsByName, mcp__ToscaCloudMcpServer__SearchPlaylistsByName, mcp__ToscaCloudMcpServer__AddPlaylist, mcp__ToscaCloudMcpServer__DeletePlaylistById, mcp__ToscaCloudMcpServer__UpdatePlaylistRunSchedule, mcp__ToscaCloudMcpServer__SearchArtifacts, mcp__ToscaCloudMcpServer__GetModulesSummary, mcp__ToscaCloudMcpServer__AnalyzeTestCaseItems, mcp__ToscaCloudMcpServer__ApplyTestCaseItemRenames, mcp__ToscaCloudMcpServer__ScaffoldTestCase, mcp__ToscaCloudMcpServer__CreateFolder, mcp__ToscaCloudMcpServer__MoveArtifactsTool, mcp__ToscaCloudMcpServer__ListSimulatorAgents, mcp__ToscaCloudMcpServer__CreateApiSimulation, mcp__ToscaCloudMcpServer__DeployApiSimulation, mcp__playwright__browser_navigate, mcp__playwright__browser_navigate_back, mcp__playwright__browser_snapshot, mcp__playwright__browser_evaluate, mcp__playwright__browser_click, mcp__playwright__browser_hover, mcp__playwright__browser_type, mcp__playwright__browser_press_key, mcp__playwright__browser_fill_form, mcp__playwright__browser_select_option, mcp__playwright__browser_handle_dialog, mcp__playwright__browser_wait_for, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_resize, mcp__playwright__browser_network_requests, mcp__playwright__browser_console_messages, mcp__playwright__browser_tabs, mcp__playwright__browser_close
+tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, mcp__ToscaCloudMcpServer__RunPlaylist, mcp__ToscaCloudMcpServer__GetRecentRuns, mcp__ToscaCloudMcpServer__GetRecentPlaylistRunLogs, mcp__ToscaCloudMcpServer__GetFailedTestSteps, mcp__ToscaCloudMcpServer__GetPlaylistIdsByName, mcp__ToscaCloudMcpServer__SearchPlaylistsByName, mcp__ToscaCloudMcpServer__AddPlaylist, mcp__ToscaCloudMcpServer__DeletePlaylistById, mcp__ToscaCloudMcpServer__UpdatePlaylistRunSchedule, mcp__ToscaCloudMcpServer__SearchArtifacts, mcp__ToscaCloudMcpServer__GetModulesSummary, mcp__ToscaCloudMcpServer__AnalyzeTestCaseItems, mcp__ToscaCloudMcpServer__ApplyTestCaseItemRenames, mcp__ToscaCloudMcpServer__ScaffoldTestCase, mcp__ToscaCloudMcpServer__CreateFolder, mcp__ToscaCloudMcpServer__MoveArtifactsTool, mcp__ToscaCloudMcpServer__ListSimulatorAgents, mcp__ToscaCloudMcpServer__CreateApiSimulation, mcp__ToscaCloudMcpServer__DeployApiSimulation, mcp__playwright__browser_navigate, mcp__playwright__browser_navigate_back, mcp__playwright__browser_snapshot, mcp__playwright__browser_evaluate, mcp__playwright__browser_click, mcp__playwright__browser_hover, mcp__playwright__browser_type, mcp__playwright__browser_press_key, mcp__playwright__browser_fill_form, mcp__playwright__browser_select_option, mcp__playwright__browser_handle_dialog, mcp__playwright__browser_wait_for, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_resize, mcp__playwright__browser_network_requests, mcp__playwright__browser_console_messages, mcp__playwright__browser_tabs, mcp__playwright__browser_close, agent
 model: opus
+memory: project
 color: blue
+mcpServers:
+  # Inline definition: scoped to this subagent only
+  - playwright:
+      type: stdio
+      command: npx
+      args: ["-y", "@playwright/mcp@latest"]
+  # Reference by name: reuses an already-configured server
+  - github
+skills:
+  - browser-verify
+  - tosca-automation
 ---
 
 You are a TOSCA Cloud automation specialist operating `tosca_cli.py` against a live tenant.

@@ -50,7 +50,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 import typer
@@ -968,6 +968,369 @@ def _generate_ulid() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared mutation helpers
+#
+# These encode the discipline from CLAUDE.md / SKILL.md:
+#
+#   * "Auto-confirm every write" — after PUT/PATCH, GET the artifact and assert
+#     `version` bumped (and, when we know the expected value, that the field
+#     actually changed). MBT PATCH silently accepts and drops unsupported ops;
+#     Inventory v3 silently ignores MBT-shape bodies — HTTP 204/"✓" are NOT
+#     proof of success.
+#   * "Name-based disambiguation" — name-only lookups error with a listing +
+#     require `--index N` to resolve when multiple items match, so shortcut
+#     commands never silently pick the wrong folder/step/attribute.
+#   * "JS dynamic-value lint" — `{`, `"`, `[` at the root of an Execute /
+#     Verify JavaScript value silently breaks the step; warn before landing.
+#   * "ID policy" — TestStepV2.id and testStepValues[].id are UUIDs (not
+#     ULIDs). ULIDs are only correct for block businessParameter.id and
+#     parameterLayerId.
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid
+
+_JS_ROOT_TRAPS = ("{", '"', "[")
+
+
+def _fresh_uuid() -> str:
+    """UUID4 string for TestStepV2.id / testStepValues[].id (NOT a ULID)."""
+    return str(_uuid.uuid4())
+
+
+def _lint_js_value(value: str, *, abort: bool = False) -> None:
+    """
+    Warn (or error) when a JS value starts with a char that TBox's dynamic-value
+    parser treats as a delimiter: `{`, `"`, `[`. These are silent no-op traps
+    documented in CLAUDE.md / standard-modules.md.
+    """
+    if not isinstance(value, str):
+        return
+    stripped = value.lstrip()
+    if not stripped:
+        return
+    first = stripped[0]
+    if first in _JS_ROOT_TRAPS:
+        msg = (
+            f"JS value starts with '{first}' — TBox's dynamic-value parser will "
+            f"silently treat this as a delimiter and break the step. "
+            f"Rewrite with a `var`/ternary form or use single quotes."
+        )
+        if abort:
+            _exit_err(msg)
+        console.print(f"[yellow]⚠ JS lint:[/yellow] {msg}")
+
+
+def _find_by_name(items: list, name: str, *, label: str,
+                  index: Optional[int] = None, key: str = "name") -> tuple[int, dict]:
+    """
+    Locate one entry in `items` whose `[key]` equals `name`.
+
+    * 0 matches → error listing all available names.
+    * 1 match → return (idx, item).
+    * >1 matches → if `index` provided, return that one; otherwise error with
+      enumerated listing.
+    """
+    matches = [(i, it) for i, it in enumerate(items) if it.get(key) == name]
+    if not matches:
+        available = [it.get(key, "?") for it in items]
+        _exit_err(
+            f"No {label} named '{name}'. Available: {available}"
+        )
+    if len(matches) == 1:
+        return matches[0]
+    if index is None:
+        listing = "\n".join(
+            f"  [{i}] {it.get(key)}" + (f"  ($type={it.get('$type')})" if it.get("$type") else "")
+            for i, it in matches
+        )
+        _exit_err(
+            f"Multiple {label}s named '{name}' — disambiguate with --{label.replace(' ', '-')}-index N:\n{listing}"
+        )
+    for i, it in matches:
+        if i == index:
+            return (i, it)
+    _exit_err(
+        f"--index {index} does not match any '{name}' {label}. Indices are: "
+        f"{[i for i, _ in matches]}"
+    )
+    return matches[0]  # unreachable
+
+
+def _confirm_version_bump(fresh: dict, prior_version, *, label: str) -> None:
+    """Assert that a follow-up GET shows `version` moved past `prior_version`."""
+    now_v = fresh.get("version")
+    if prior_version is None:
+        console.print(f"[yellow]⚠[/yellow] {label}: no prior version known — cannot confirm bump (fresh version={now_v})")
+        return
+    if now_v == prior_version:
+        _exit_err(
+            f"{label}: write did NOT land — version unchanged ({now_v}). "
+            f"MBT PATCH may have silently dropped the op; fall back to full PUT."
+        )
+    console.print(f"[green]✓ confirmed[/green] {label} version {prior_version} → {now_v}")
+
+
+def _confirm_field(fresh: dict, path: list, expected, *, label: str) -> None:
+    """Walk a path of keys/indices into `fresh` and assert the leaf equals `expected`."""
+    node = fresh
+    trail = []
+    for p in path:
+        trail.append(str(p))
+        try:
+            node = node[p]
+        except (KeyError, IndexError, TypeError):
+            _exit_err(f"{label}: confirm-GET could not resolve path /{'/'.join(trail)} — write may have been dropped.")
+    if node != expected:
+        _exit_err(
+            f"{label}: field at /{'/'.join(trail)} is {node!r} after write (expected {expected!r}) "
+            f"— the server did not apply the change."
+        )
+    console.print(f"[green]✓ confirmed[/green] {label} /{'/'.join(trail)} = {expected!r}")
+
+
+def _parse_kv_pairs(pairs: Optional[List[str]]) -> dict:
+    """Turn a list of 'k=v' strings into a dict (for CLI --param flags)."""
+    out: dict = {}
+    for raw in pairs or []:
+        if "=" not in raw:
+            _exit_err(f"Expected key=value pair, got: {raw!r}")
+        k, v = raw.split("=", 1)
+        out[k.strip()] = v
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tenant-verified standard-module catalog
+#
+# All GUIDs below were validated on this tenant via
+#   GET /packages/<pkg>/modules/<moduleGuid>
+# Re-verify (one-off) by running:
+#   python -c "import sys;sys.path.insert(0,'.');from tosca_cli import ToscaClient;\
+#     c=ToscaClient();import json;print(json.dumps(c.get(c.mbt('packages/Html/modules/<guid>')),indent=2))"
+#
+# Caveats this catalog encodes so you do NOT rediscover them the hard way:
+#   * Wait lives in the Timing package (NOT Html).
+#   * OpenUrl / CloseBrowser / Wait run through `engine: Framework`;
+#     Execute JS / Verify JS Result run through `engine: Html`.
+#   * Verify JS Result's Search Criteria has nested Title/Url/WindowIndex/
+#     UseActiveTab sub-attrs in the MODULE schema, but in step JSON they are
+#     referenced FLAT at the testStepValues root by their leaf IDs.
+#   * CloseBrowser takes a Title *pattern* (wildcards supported) — it does
+#     NOT accept the raw window URL.
+# ---------------------------------------------------------------------------
+
+_STD_MODULES: dict = {
+    "open-url": {
+        "display":     "OpenUrl",
+        "module_id":   "9f8d14b3-7651-4add-bcfe-341a996662cc",
+        "package":     "Html",
+        "engine":      "Framework",
+        "is_rescan":   False,
+        "attrs": {
+            "Url":              "39e342b2-960b-2251-d1b9-5b340c12fa19",
+            "UseActiveTab":     "39ef3b0d-1ee2-a137-d5d3-976be1b8c766",
+            "ForcePageSwitch":  "deaad6b0-32d2-4c60-a682-40e30540e3d9",
+            "BrowserArguments": "39f50026-d22f-265c-6c17-b85f8fde68a6",
+        },
+        "value_ranges": {
+            "UseActiveTab":    ["True", "False"],
+            "ForcePageSwitch": ["True", "False"],
+        },
+        "defaults":    {"UseActiveTab": "False", "ForcePageSwitch": "True"},
+        "required":    ["Url"],
+    },
+    "close-browser": {
+        "display":     "CloseBrowser",
+        "module_id":   "3019e887-48ca-4a7e-8759-79e7762c6152",
+        "package":     "Html",
+        "engine":      "Framework",
+        "is_rescan":   False,
+        "attrs":       {"Title": "39e342b2-958e-3e2f-7c85-29871c23f1dc"},
+        "defaults":    {},
+        "required":    ["Title"],
+    },
+    "wait": {
+        "display":     "TBox Wait",
+        "module_id":   "80b7982e-0e10-4bc0-bdf3-6bc04503fd63",
+        "package":     "Timing",
+        "engine":      "Framework",
+        "is_rescan":   False,
+        "attrs":       {"Duration": "39e342b2-958e-ba1f-bb58-702e193d6016"},
+        "defaults":    {},
+        "required":    ["Duration"],
+    },
+    "execute-js": {
+        "display":     "Execute JavaScript",
+        "module_id":   "54f432f6-61ed-4c9a-a7dc-9e3970a08323",
+        "package":     "Html",
+        "engine":      "Html",
+        "is_rescan":   False,
+        "attrs": {
+            "Search Criteria": "3a083bf5-d96f-6330-697e-24f495d04dc2",
+            "JavaScript":      "39e342b2-960b-6374-ecab-25712ac9f14d",
+        },
+        "defaults":    {},
+        "required":    ["JavaScript"],
+        "lint_js":     ["JavaScript"],
+    },
+    "verify-js": {
+        "display":     "Verify JavaScript Result",
+        "module_id":   "a9cc198f-ae01-4665-ac02-5000d6b0c7de",
+        "package":     "Html",
+        "engine":      "Html",
+        "is_rescan":   False,
+        "attrs": {
+            # Flat shape observed in actual test-case JSON on this tenant.
+            # The module schema nests Title/Url/WindowIndex/UseActiveTab under
+            # Search Criteria, but the step references them directly by their
+            # leaf IDs at the testStepValues root.
+            "Title":            "39f104f4-1216-105a-c308-1a054521d1aa",
+            "Url":               "3a083bf9-4e50-358e-54f9-b079b72465ed",
+            "Window Index":      "3a083bf9-4e50-3217-15f8-4668d92d5278",
+            "UseActiveTab":      "d754bb56-4c61-4426-993e-9f0c89df9d9a",
+            "JavaScript":        "39f104f4-1216-6d89-dc84-34f8c5248700",
+            "Result":            "39f104f4-1216-d3a0-58ed-22b074106709",
+        },
+        "value_ranges": {"UseActiveTab": ["True", "False"]},
+        "data_types":   {"UseActiveTab": "Boolean"},
+        "action_modes": {"Result": "Verify"},
+        "defaults":     {"UseActiveTab": "True"},
+        "required":     ["JavaScript", "Result"],
+        "lint_js":      ["JavaScript"],
+    },
+}
+
+
+def _build_std_step(
+    kind:   str,
+    values: dict,
+    *,
+    name:   Optional[str] = None,
+    lint:   bool          = True,
+) -> dict:
+    """
+    Build a fresh TestStepV2 object for a tenant-verified standard module.
+
+    * ``kind`` must be a key in ``_STD_MODULES`` (open-url / close-browser /
+      wait / execute-js / verify-js).
+    * ``values`` maps attribute names → desired values. Unknown attrs error.
+      Missing ``required`` attrs error. ``defaults`` fill in for flags the
+      caller did not explicitly set.
+    * ``lint`` (default True) runs :func:`_lint_js_value` on each attribute
+      listed under the module's ``lint_js`` list.
+
+    The returned dict has fresh UUIDs for the step and every testStepValue
+    — it can be inserted into any folder's ``items`` list.
+    """
+    spec = _STD_MODULES.get(kind)
+    if spec is None:
+        _exit_err(
+            f"Unknown standard step kind {kind!r}. Available: "
+            f"{sorted(_STD_MODULES)}"
+        )
+    # Reject unknown attrs early — catches typos like 'url' vs 'Url'.
+    unknown = [k for k in values if k not in spec["attrs"]]
+    if unknown:
+        _exit_err(
+            f"{spec['display']}: unknown attribute(s) {unknown}. "
+            f"Available: {sorted(spec['attrs'])}"
+        )
+    # Merge in defaults only for attrs the caller did not set explicitly.
+    merged = dict(spec.get("defaults", {}))
+    merged.update(values)
+    # Enforce required attrs.
+    missing = [r for r in spec.get("required", []) if r not in merged]
+    if missing:
+        _exit_err(
+            f"{spec['display']}: missing required attribute(s) {missing}. "
+            f"Pass them in --values."
+        )
+    if lint:
+        for k in spec.get("lint_js", []):
+            if k in merged:
+                _lint_js_value(str(merged[k]))
+
+    pkg_ref   = {"id": spec["package"], "type": "Standard"}
+    tsv_list: list = []
+    for attr_name, val in merged.items():
+        attr_id   = spec["attrs"][attr_name]
+        data_type = spec.get("data_types", {}).get(attr_name, "String")
+        action    = spec.get("action_modes", {}).get(attr_name, "Input")
+        meta: dict = {"businessType": "", "isUsedAsIdentification": False}
+        if attr_name in spec.get("value_ranges", {}):
+            meta["valueRange"] = spec["value_ranges"][attr_name]
+        tsv_list.append({
+            "id":            _fresh_uuid(),
+            "name":          attr_name,
+            "value":         str(val),
+            "actionMode":    action,
+            "dataType":      data_type,
+            "actionProperty": "",
+            "operator":      "Equals",
+            "moduleAttributeReference": {
+                "id":               attr_id,
+                "moduleId":         spec["module_id"],
+                "packageReference": pkg_ref,
+                "metadata":         meta,
+            },
+            "subValues":     [],
+            "disabled":      False,
+        })
+    return {
+        "$type":            "TestStepV2",
+        "id":               _fresh_uuid(),
+        "name":             name or spec["display"],
+        "disabled":         False,
+        "moduleReference": {
+            "id":               spec["module_id"],
+            "packageReference": pkg_ref,
+            "metadata": {
+                "isRescanEnabled": spec["is_rescan"],
+                "engine":          spec["engine"],
+            },
+        },
+        "testStepValues":   tsv_list,
+    }
+
+
+def _build_std_folder(name: str, items: Optional[list] = None) -> dict:
+    """Build a top-level TestStepFolderV2 (the 4-folder pattern's building block)."""
+    return {
+        "$type":    "TestStepFolderV2",
+        "id":       _fresh_uuid(),
+        "name":     name,
+        "disabled": False,
+        "items":    items or [],
+    }
+
+
+def _playlist_items_to_input(raw_items: list) -> list:
+    """
+    Reshape items returned by `GET /playlists/{id}` (TestCaseV1) into the
+    `InputTestCaseV1` shape that the PUT endpoint demands.
+
+    Only `sourceId`, `disabled`, `parameters`, `characteristics` survive —
+    everything else is server-managed and must not be echoed back. Matches
+    the shape already used by `playlists set-characteristic`.
+    """
+    out: list = []
+    for item in raw_items or []:
+        if item.get("$type") not in ("TestCaseV1", "InputTestCaseV1"):
+            continue
+        entry: dict = {
+            "$type":    "InputTestCaseV1",
+            "sourceId": item.get("sourceId", ""),
+            "disabled": item.get("disabled", False),
+        }
+        if item.get("parameters"):
+            entry["parameters"] = item["parameters"]
+        if item.get("characteristics"):
+            entry["characteristics"] = item["characteristics"]
+        out.append(entry)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # config commands
 # ---------------------------------------------------------------------------
 
@@ -1450,12 +1813,18 @@ def cases_update(
     json_file: str  = typer.Option(..., "--json-file", "-f",
                                    help="Path to JSON file with full TestCaseV2 body"),
     as_json:   bool = typer.Option(False, "--json", help="Echo back the body sent"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT GET that verifies version bumped"),
 ):
     """
     Replace a test case (full PUT – TestCases_Update2).
 
     Provide a JSON file with the complete TestCaseV2 object.
     Get the current body first with:  tosca cases get <id> --json
+
+    After the PUT, this command issues a confirm-GET and verifies that the
+    server-side `version` moved past the prior snapshot — a 204 alone is not
+    proof that the write landed.
     """
     src = Path(json_file)
     if not src.exists():
@@ -1467,11 +1836,23 @@ def cases_update(
     if as_json:
         _output_json(body)
     client = ToscaClient()
+    prior_version = None
+    if not skip_confirm:
+        try:
+            prior_version = (client.get_case(case_id) or {}).get("version")
+        except ToscaError:
+            prior_version = None
     try:
         client.update_case(case_id, body)
     except ToscaError as e:
         _exit_err(str(e))
     console.print(f"[green]✓ Test case {case_id} updated.[/green]")
+    if not skip_confirm:
+        try:
+            fresh = client.get_case(case_id)
+        except ToscaError as e:
+            _exit_err(f"Confirm-GET failed after PUT: {e}")
+        _confirm_version_bump(fresh, prior_version, label=f"testCase {case_id}")
 
 
 @cases_app.command("patch")
@@ -1499,6 +1880,351 @@ def cases_patch(
     except ToscaError as e:
         _exit_err(str(e))
     console.print(f"[green]✓ Test case {case_id} patched.[/green]")
+
+
+@cases_app.command("set-step-value")
+def cases_set_step_value(
+    case_id:      str = typer.Argument(..., help="Test case Id"),
+    folder:       str = typer.Argument(..., help="Name of the top-level folder, e.g. 'Process' / 'Verification'"),
+    step:         str = typer.Argument(..., help="Name of the TestStepV2 inside the folder"),
+    param:        str = typer.Argument(..., help="Name of the testStepValue (module attribute name) inside the step"),
+    to:           str = typer.Option(..., "--to", help="New value to assign"),
+    js:           bool = typer.Option(False, "--js",
+                                      help="Lint the value as an Execute/Verify JavaScript payload "
+                                           "(warns on leading `{`/`\"`/`[` parser traps)"),
+    folder_index: Optional[int] = typer.Option(None, "--folder-index",
+                                               help="Required when multiple top-level folders share the same name"),
+    step_index:   Optional[int] = typer.Option(None, "--step-index",
+                                               help="Required when multiple steps in the folder share the same name"),
+    param_index:  Optional[int] = typer.Option(None, "--param-index",
+                                               help="Required when multiple testStepValues share the same name"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Shortcut: set a single testStepValue.value inside a top-level folder.
+
+    This is the GET → mutate → PUT pattern that most agent work reduces to.
+    It uses a full PUT (not PATCH) because MBT PATCH silently drops deep
+    JSON-pointer ops into nested step trees.
+
+    Scope: top-level folder + direct step only. For nested ControlFlow
+    navigation (If/Else/Loop branches), use `cases update --json-file`.
+
+    Ambiguity: if multiple folders / steps / params share the same name,
+    the command prints an enumerated listing and asks for the matching
+    `--*-index N` flag. It will never silently pick the wrong one.
+    """
+    if js:
+        _lint_js_value(to)
+
+    client = ToscaClient()
+    try:
+        case = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load test case {case_id}: {e}")
+
+    prior_version = case.get("version")
+    items = case.get("testCaseItems") or []
+    _, folder_obj = _find_by_name(items, folder, label="folder", index=folder_index)
+
+    sub_items = folder_obj.get("items") or []
+    _, step_obj = _find_by_name(sub_items, step, label="step", index=step_index)
+    if step_obj.get("$type") and step_obj.get("$type") != "TestStepV2":
+        _exit_err(
+            f"Step '{step}' is a {step_obj['$type']} (ControlFlow / folder), not a TestStepV2. "
+            f"Use `cases update --json-file` for nested edits."
+        )
+
+    tsvs = step_obj.get("testStepValues") or []
+    _, tsv = _find_by_name(tsvs, param, label="parameter", index=param_index)
+    before = tsv.get("value")
+    tsv["value"] = to
+
+    console.print(
+        f"[cyan]/{folder}/{step}/{param}[/cyan]: {before!r} → [bold]{to!r}[/bold]"
+    )
+
+    try:
+        client.update_case(case_id, case)
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+    console.print(f"[green]✓ Test case {case_id} updated.[/green]")
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    _confirm_version_bump(fresh, prior_version, label=f"testCase {case_id}")
+    # Resolve the same path in the fresh doc to verify the value landed.
+    fresh_items = fresh.get("testCaseItems") or []
+    _, ff = _find_by_name(fresh_items, folder, label="folder", index=folder_index)
+    fi = (ff.get("items") or [])
+    _, fs = _find_by_name(fi, step, label="step", index=step_index)
+    ftsvs = fs.get("testStepValues") or []
+    _, ftsv = _find_by_name(ftsvs, param, label="parameter", index=param_index)
+    if ftsv.get("value") != to:
+        _exit_err(
+            f"Confirm: /{folder}/{step}/{param} is {ftsv.get('value')!r} after PUT, "
+            f"expected {to!r}. The server did not accept the write."
+        )
+    console.print(f"[green]✓ confirmed[/green] /{folder}/{step}/{param} = {to!r}")
+
+
+@cases_app.command("insert-step")
+def cases_insert_step(
+    case_id:      str = typer.Argument(..., help="Test case Id"),
+    folder:       str = typer.Argument(..., help="Name of the top-level folder to insert into"),
+    json_file:    str = typer.Option(..., "--json-file", "-f",
+                                     help="Path to a JSON file containing ONE TestStepV2 object"),
+    after:        Optional[str] = typer.Option(None, "--after",
+                                               help="Insert immediately after the step with this name"),
+    before:       Optional[str] = typer.Option(None, "--before",
+                                               help="Insert immediately before the step with this name"),
+    at_start:     bool = typer.Option(False, "--at-start",
+                                      help="Insert at position 0 in the folder"),
+    folder_index: Optional[int] = typer.Option(None, "--folder-index",
+                                               help="Disambiguate when multiple folders share the same name"),
+    anchor_index: Optional[int] = typer.Option(None, "--anchor-index",
+                                               help="Disambiguate --after / --before anchor if non-unique"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Shortcut: insert one TestStepV2 into a top-level folder.
+
+    The JSON file should contain a single TestStepV2 object — with or without
+    the `id` / `testStepValues[].id` fields. Missing IDs are filled with fresh
+    UUIDs automatically (NOT ULIDs — ULIDs are only correct for block
+    businessParameter.id / parameterLayerId).
+
+    Position (exactly one required): --after NAME | --before NAME | --at-start
+    (default if none of the three is set: append to end).
+    """
+    anchors = sum(1 for x in (after, before, at_start) if x)
+    if anchors > 1:
+        _exit_err("Pick exactly one of --after / --before / --at-start (or none to append).")
+
+    src = Path(json_file)
+    if not src.exists():
+        _exit_err(f"File not found: {json_file}")
+    try:
+        step_body = json.loads(src.read_text())
+    except json.JSONDecodeError as e:
+        _exit_err(f"Invalid JSON in {json_file}: {e}")
+    if not isinstance(step_body, dict):
+        _exit_err("--json-file must contain a single TestStepV2 object, not a list.")
+
+    step_body.setdefault("$type", "TestStepV2")
+    if step_body["$type"] != "TestStepV2":
+        _exit_err(f"insert-step only supports $type=TestStepV2 (got {step_body['$type']!r}).")
+    step_body.setdefault("disabled", False)
+    if not step_body.get("id"):
+        step_body["id"] = _fresh_uuid()
+    for tsv in step_body.get("testStepValues") or []:
+        if not tsv.get("id"):
+            tsv["id"] = _fresh_uuid()
+        tsv.setdefault("disabled", False)
+        tsv.setdefault("subValues", [])
+
+    client = ToscaClient()
+    try:
+        case = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load test case {case_id}: {e}")
+
+    prior_version = case.get("version")
+    items = case.get("testCaseItems") or []
+    _, folder_obj = _find_by_name(items, folder, label="folder", index=folder_index)
+    sub_items = folder_obj.setdefault("items", [])
+
+    # Resolve insertion index.
+    if at_start:
+        pos = 0
+    elif after:
+        idx, _ = _find_by_name(sub_items, after, label="step", index=anchor_index)
+        pos = idx + 1
+    elif before:
+        idx, _ = _find_by_name(sub_items, before, label="step", index=anchor_index)
+        pos = idx
+    else:
+        pos = len(sub_items)
+
+    sub_items.insert(pos, step_body)
+
+    try:
+        client.update_case(case_id, case)
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+    console.print(
+        f"[green]✓ Inserted step[/green] [bold]{step_body.get('name', step_body['id'])}[/bold] "
+        f"at /{folder}[{pos}]"
+    )
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    _confirm_version_bump(fresh, prior_version, label=f"testCase {case_id}")
+    fresh_items = fresh.get("testCaseItems") or []
+    _, ff = _find_by_name(fresh_items, folder, label="folder", index=folder_index)
+    sub = ff.get("items") or []
+    if pos >= len(sub) or sub[pos].get("id") != step_body["id"]:
+        _exit_err(
+            f"Confirm: inserted step id {step_body['id']} not at /{folder}[{pos}] — write dropped?"
+        )
+    console.print(f"[green]✓ confirmed[/green] step {step_body['id']} at /{folder}[{pos}]")
+
+
+@cases_app.command("scaffold-web")
+def cases_scaffold_web(
+    case_id:        str           = typer.Argument(..., help="Existing (ideally empty) test case Id to scaffold"),
+    url:            str           = typer.Option(..., "--url", "-u", help="URL the OpenUrl precondition will navigate to"),
+    title_pattern:  Optional[str] = typer.Option(None, "--title-pattern",
+                                                 help="Window title pattern for CloseBrowser / cleanup tab-match. "
+                                                      "Default: derived from --url host (e.g. 'https://www.foo.com/' → '*foo*')."),
+    title:          Optional[str] = typer.Option(None, "--title",
+                                                 help="Optional document.title verification (adds a Verify JS Result step checking `return document.title;`)"),
+    open_url_use_active_tab: bool = typer.Option(False, "--open-use-active-tab",
+                                                 help="Set OpenUrl.UseActiveTab=True (default False — opens a fresh tab)"),
+    open_url_force_page_switch: bool = typer.Option(True, "--open-force-page-switch/--open-no-force-page-switch",
+                                                    help="Set OpenUrl.ForcePageSwitch (default True)"),
+    overwrite:      bool          = typer.Option(False, "--overwrite",
+                                                 help="Overwrite existing testCaseItems (otherwise refuses if any folders already exist)"),
+    skip_confirm:   bool          = typer.Option(False, "--skip-confirm",
+                                                 help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Scaffold a 4-folder Html test case skeleton into an EXISTING test case.
+
+    Creates Precondition / Process / Verification / Teardown folders with:
+
+        Precondition
+          └─ OpenUrl <url>  (Framework-engine, packageReference=Html)
+        Process
+          (empty — caller adds Html GUI steps via `cases insert-step` /
+           `cases set-step-value`)
+        Verification
+          (optional:  Verify JS Result → document.title == --title)
+        Teardown
+          └─ CloseBrowser <title-pattern>
+
+    All GUIDs come from ``_STD_MODULES`` (validated on the tenant at build
+    time). Uses full PUT — never PATCH — so the edit either lands in one
+    trip or fails loud.
+
+    Intended usage:
+
+        python tosca_cli.py cases create --name "My Web Flow"
+        # → Id: ABC...
+        python tosca_cli.py cases scaffold-web ABC --url https://www.example.com --title "Example Domain"
+        # now add your app-specific steps:
+        python tosca_cli.py cases insert-step ABC Process --json-file my-click-step.json
+    """
+    from urllib.parse import urlparse
+
+    def _derive_title_pattern(u: str) -> str:
+        try:
+            host = urlparse(u).hostname or u
+        except Exception:
+            host = u
+        # Strip common prefixes, grab the core label.
+        host = host.lower().removeprefix("www.")
+        core = host.split(".")[0] if "." in host else host
+        return f"*{core}*"
+
+    tp = title_pattern or _derive_title_pattern(url)
+
+    client = ToscaClient()
+    try:
+        case = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load test case {case_id}: {e}")
+
+    existing = case.get("testCaseItems") or []
+    if existing and not overwrite:
+        names = [it.get("name") for it in existing]
+        _exit_err(
+            f"Test case {case_id} already has testCaseItems {names}. "
+            f"Re-run with --overwrite to replace them."
+        )
+
+    prior_version = case.get("version")
+
+    # Build the 4 folders with the minimal standard-step payload.
+    open_url_step = _build_std_step(
+        "open-url",
+        values = {
+            "Url":             url,
+            "UseActiveTab":    "True" if open_url_use_active_tab else "False",
+            "ForcePageSwitch": "True" if open_url_force_page_switch else "False",
+        },
+        name = f"OpenUrl – {url}",
+    )
+
+    verification_items: list = []
+    if title:
+        verification_items.append(
+            _build_std_step(
+                "verify-js",
+                values = {
+                    "UseActiveTab": "True",
+                    "JavaScript":   "return document.title;",
+                    "Result":       title,
+                },
+                name = f"Verify: document.title = {title}",
+            )
+        )
+
+    close_browser_step = _build_std_step(
+        "close-browser",
+        values = {"Title": tp},
+        name   = f"CloseBrowser {tp}",
+    )
+
+    case["testCaseItems"] = [
+        _build_std_folder("Precondition",  [open_url_step]),
+        _build_std_folder("Process",       []),
+        _build_std_folder("Verification",  verification_items),
+        _build_std_folder("Teardown",      [close_browser_step]),
+    ]
+
+    try:
+        client.update_case(case_id, case)
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+
+    console.print(
+        f"[green]✓ Scaffolded[/green] Precondition/Process/Verification/Teardown into "
+        f"[cyan]{case_id}[/cyan]"
+    )
+    console.print(f"  • Precondition:  OpenUrl → [bold]{url}[/bold]")
+    console.print(f"  • Process:       [dim](empty — add your steps)[/dim]")
+    if title:
+        console.print(f"  • Verification:  Verify JS document.title == [bold]{title}[/bold]")
+    else:
+        console.print(f"  • Verification:  [dim](empty — re-run with --title or use insert-step)[/dim]")
+    console.print(f"  • Teardown:      CloseBrowser [bold]{tp}[/bold]")
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_case(case_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    _confirm_version_bump(fresh, prior_version, label=f"testCase {case_id}")
+    fresh_items = fresh.get("testCaseItems") or []
+    fresh_names = [it.get("name") for it in fresh_items]
+    expected    = ["Precondition", "Process", "Verification", "Teardown"]
+    if fresh_names != expected:
+        _exit_err(
+            f"Confirm: testCaseItems names are {fresh_names}, expected {expected}."
+        )
+    console.print(f"[green]✓ confirmed[/green] 4-folder skeleton = {fresh_names}")
 
 
 @cases_app.command("export-tsu")
@@ -1637,23 +2363,43 @@ def modules_update(
     module_id:  str  = typer.Argument(..., help="Module Id"),
     json_file:  str  = typer.Option(..., "--json-file", "-f", help="Path to module JSON file (full ModuleV2 body)"),
     as_json:    bool = typer.Option(False, "--json", help="Raw JSON output"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT GET that verifies version bumped"),
 ):
-    """Replace a module with a full PUT body (ModuleV2 JSON file)."""
+    """
+    Replace a module with a full PUT body (ModuleV2 JSON file).
+
+    After the PUT, issues a confirm-GET and verifies that the server-side
+    `version` moved past the prior snapshot — a 200 alone is not proof
+    that the write landed.
+    """
     import json as _json
     try:
         body = _json.loads(Path(json_file).read_text())
     except Exception as e:
         _exit_err(f"Could not read {json_file}: {e}")
     client = ToscaClient()
+    prior_version = None
+    if not skip_confirm:
+        try:
+            prior_version = (client.get_module(module_id) or {}).get("version")
+        except ToscaError:
+            prior_version = None
     try:
         result = client.update_module(module_id, body)
     except ToscaError as e:
         _exit_err(str(e))
     if as_json:
         _output_json(result)
-        return
-    name = result.get("name", module_id)
-    console.print(f"[green]✓ Updated module[/green] [bold]{name}[/bold] [cyan]{module_id}[/cyan]")
+    else:
+        name = result.get("name", module_id)
+        console.print(f"[green]✓ Updated module[/green] [bold]{name}[/bold] [cyan]{module_id}[/cyan]")
+    if not skip_confirm:
+        try:
+            fresh = client.get_module(module_id)
+        except ToscaError as e:
+            _exit_err(f"Confirm-GET failed after PUT: {e}")
+        _confirm_version_bump(fresh, prior_version, label=f"module {module_id}")
 
 
 @modules_app.command("delete")
@@ -1672,6 +2418,149 @@ def modules_delete(
     except ToscaError as e:
         _exit_err(str(e))
     console.print(f"[green]✓ Deletion accepted for module {module_id}[/green]")
+
+
+@modules_app.command("add-attr-param")
+def modules_add_attr_param(
+    module_id:   str  = typer.Argument(..., help="Module Id"),
+    attr:        str  = typer.Argument(..., help="Module attribute name (e.g. 'Products')"),
+    param_name:  str  = typer.Argument(..., help="Parameter name (e.g. 'ClassName', 'Path', 'Id')"),
+    to:          str  = typer.Option(..., "--to", help="Parameter value"),
+    param_type:  str  = typer.Option("TechnicalId", "--type",
+                                     help="Parameter type (TechnicalId | Setting | Default). Default: TechnicalId."),
+    attr_index:  Optional[int] = typer.Option(None, "--attr-index",
+                                              help="Required when multiple attributes share the same name"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Upsert a module-attribute parameter (e.g. ClassName / Id / Path TechnicalId).
+
+    Keeps the existing ULID `id` when a parameter with the same name is already
+    present (required for server-side continuity) — only the `value` is replaced.
+    Uses full PUT (modules have no working PATCH surface for this).
+    """
+    client = ToscaClient()
+    try:
+        mod = client.get_module(module_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load module {module_id}: {e}")
+    prior_version = mod.get("version")
+
+    attrs = mod.get("attributes") or []
+    _, attr_obj = _find_by_name(attrs, attr, label="attribute", index=attr_index)
+    params = attr_obj.setdefault("parameters", [])
+
+    existing = next((p for p in params if p.get("name") == param_name), None)
+    if existing is not None:
+        before_val = existing.get("value")
+        existing["value"] = to
+        if param_type:
+            existing["type"] = param_type
+        verb = "updated"
+    else:
+        params.append({
+            "id":    _generate_ulid(),
+            "name":  param_name,
+            "value": to,
+            "type":  param_type,
+        })
+        before_val = None
+        verb = "added"
+
+    console.print(
+        f"[cyan]{attr}.{param_name}[/cyan] [{param_type}]: {before_val!r} → [bold]{to!r}[/bold] ({verb})"
+    )
+
+    try:
+        client.update_module(module_id, mod)
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+    console.print(f"[green]✓ Module {module_id} updated.[/green]")
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_module(module_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    _confirm_version_bump(fresh, prior_version, label=f"module {module_id}")
+    fattrs = fresh.get("attributes") or []
+    _, fattr = _find_by_name(fattrs, attr, label="attribute", index=attr_index)
+    fparam = next((p for p in (fattr.get("parameters") or []) if p.get("name") == param_name), None)
+    if not fparam or fparam.get("value") != to:
+        _exit_err(
+            f"Confirm: {attr}.{param_name} is "
+            f"{(fparam or {}).get('value')!r} after PUT, expected {to!r}."
+        )
+    console.print(f"[green]✓ confirmed[/green] {attr}.{param_name} = {to!r}")
+
+
+@modules_app.command("set-param")
+def modules_set_param(
+    module_id:    str  = typer.Argument(..., help="Module Id"),
+    param_name:   str  = typer.Argument(..., help="Module-level parameter name (e.g. a Steering flag)"),
+    to:           str  = typer.Option(..., "--to", help="Parameter value"),
+    param_type:   str  = typer.Option("Setting", "--type",
+                                      help="Parameter type. Default: Setting."),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Upsert a module-level parameter (e.g. Steering flags).
+
+    Like `add-attr-param`, but operates on the module's own `parameters[]`
+    array (not an attribute's). Keeps the existing id on update.
+    """
+    client = ToscaClient()
+    try:
+        mod = client.get_module(module_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load module {module_id}: {e}")
+    prior_version = mod.get("version")
+
+    params = mod.setdefault("parameters", [])
+    existing = next((p for p in params if p.get("name") == param_name), None)
+    if existing is not None:
+        before_val = existing.get("value")
+        existing["value"] = to
+        if param_type:
+            existing["type"] = param_type
+        verb = "updated"
+    else:
+        params.append({
+            "id":    _generate_ulid(),
+            "name":  param_name,
+            "value": to,
+            "type":  param_type,
+        })
+        before_val = None
+        verb = "added"
+
+    console.print(
+        f"[cyan]{param_name}[/cyan] [{param_type}]: {before_val!r} → [bold]{to!r}[/bold] ({verb})"
+    )
+
+    try:
+        client.update_module(module_id, mod)
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+    console.print(f"[green]✓ Module {module_id} updated.[/green]")
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_module(module_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    _confirm_version_bump(fresh, prior_version, label=f"module {module_id}")
+    fparam = next((p for p in (fresh.get("parameters") or []) if p.get("name") == param_name), None)
+    if not fparam or fparam.get("value") != to:
+        _exit_err(
+            f"Confirm: /parameters/{param_name} is "
+            f"{(fparam or {}).get('value')!r} after PUT, expected {to!r}."
+        )
+    console.print(f"[green]✓ confirmed[/green] /parameters/{param_name} = {to!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1901,8 +2790,15 @@ def playlists_update(
     desc:        Optional[str] = typer.Option(None,  "--desc", "-d", help="New description"),
     run_mode:    Optional[str] = typer.Option(None,  "--run-mode", "-m",
                                               help="Run mode: parallel | sequential | sequentialOnSameAgent"),
+    skip_confirm: bool         = typer.Option(False, "--skip-confirm",
+                                              help="Skip the post-PUT GET that verifies the fields landed"),
 ):
-    """Replace a playlist (full PUT)."""
+    """
+    Replace a playlist (full PUT).
+
+    After the PUT, issues a confirm-GET and verifies that `name` / `runMode`
+    were actually applied server-side — a 2xx alone is not proof.
+    """
     client = ToscaClient()
     try:
         client.update_playlist(playlist_id, name, description=desc or "",
@@ -1910,6 +2806,21 @@ def playlists_update(
     except ToscaError as e:
         _exit_err(str(e))
     console.print(f"[green]\u2713 Playlist {playlist_id} updated.[/green]")
+    if not skip_confirm:
+        try:
+            fresh = client.get_playlist(playlist_id)
+        except ToscaError as e:
+            _exit_err(f"Confirm-GET failed after PUT: {e}")
+        _confirm_field(fresh, ["name"], name, label=f"playlist {playlist_id}")
+        if run_mode is not None:
+            # Server normalizes run-mode casing; compare case-insensitively.
+            got = str(fresh.get("runMode", "")).lower()
+            want = run_mode.lower()
+            if got != want:
+                _exit_err(
+                    f"playlist {playlist_id}: runMode did not apply — got {got!r}, wanted {want!r}"
+                )
+            console.print(f"[green]✓ confirmed[/green] playlist {playlist_id} /runMode = {got}")
 
 
 @playlists_app.command("set-characteristic")
@@ -1931,9 +2842,11 @@ def playlists_set_characteristic(
     chars = [c for c in chars if c.get("name") != char_name]
     chars.append({"name": char_name, "value": char_value})
 
-    # Transform GET items (TestCaseV1) → PUT items (InputTestCaseV1)
+    # Transform GET items (TestCaseV1) → PUT items (InputTestCaseV1).
+    # The helper preserves the existing shape (sourceId + disabled + parameters +
+    # characteristics) while normalizing `$type` and stripping server-managed fields.
     raw_items = data.get("items") or []
-    input_items = []
+    input_items: list = []
     for item in raw_items:
         if item.get("$type") in ("TestCaseV1", "InputTestCaseV1"):
             entry: dict = {
@@ -1966,6 +2879,82 @@ def playlists_set_characteristic(
     else:
         console.print(f"[green]✓ Playlist {playlist_id}:[/green] "
                       f"characteristic [bold]{char_name}[/bold] = [cyan]{char_value}[/cyan]")
+
+
+@playlists_app.command("attach-case")
+def playlists_attach_case(
+    playlist_id:  str = typer.Argument(..., help="Playlist Id"),
+    case_id:      str = typer.Argument(..., help="Test case Id (Inventory entityId) to attach"),
+    param:        Optional[List[str]] = typer.Option(None, "--param", "-p",
+                                                     help="Parameter override key=value (repeatable)"),
+    skip_confirm: bool = typer.Option(False, "--skip-confirm",
+                                      help="Skip the post-PUT confirm-GET"),
+):
+    """
+    Attach a test case to an existing playlist (append to items[]).
+
+    Handles the TestCaseV1 → InputTestCaseV1 reshape that the PUT endpoint
+    requires, so you never have to clone existing items by hand.
+
+    Example:
+      tosca playlists attach-case <pid> <tcid> -p url=https://… -p user=qa1
+    """
+    client = ToscaClient()
+    try:
+        data = client.get_playlist(playlist_id)
+    except ToscaError as e:
+        _exit_err(f"Could not load playlist {playlist_id}: {e}")
+
+    existing = _playlist_items_to_input(data.get("items") or [])
+    if any(it.get("sourceId") == case_id for it in existing):
+        console.print(
+            f"[yellow]⚠[/yellow] Test case {case_id} is already attached to playlist {playlist_id}. "
+            f"Use `playlists update --json-file` to reorder or edit params."
+        )
+        raise typer.Exit(0)
+
+    params_dict = _parse_kv_pairs(param)
+    new_entry: dict = {
+        "$type":    "InputTestCaseV1",
+        "sourceId": case_id,
+        "disabled": False,
+    }
+    if params_dict:
+        new_entry["parameters"] = [{"name": k, "value": v} for k, v in params_dict.items()]
+    existing.append(new_entry)
+
+    try:
+        client.update_playlist(
+            playlist_id,
+            name=data.get("name", playlist_id),
+            description=data.get("description", ""),
+            run_mode=data.get("runMode", "parallel"),
+            items=existing,
+            parameters=data.get("parameters") or None,
+            characteristics=data.get("characteristics") or None,
+            upload_recordings=data.get("uploadRecordingsOnSuccess"),
+        )
+    except ToscaError as e:
+        _exit_err(f"PUT failed: {e}")
+
+    console.print(
+        f"[green]✓ Attached[/green] test case [cyan]{case_id}[/cyan] to "
+        f"playlist [cyan]{playlist_id}[/cyan] (now {len(existing)} items)"
+    )
+
+    if skip_confirm:
+        return
+    try:
+        fresh = client.get_playlist(playlist_id)
+    except ToscaError as e:
+        _exit_err(f"Confirm-GET failed after PUT: {e}")
+    fresh_ids = [it.get("sourceId") for it in fresh.get("items") or []]
+    if case_id not in fresh_ids:
+        _exit_err(
+            f"Confirm: test case {case_id} not in playlist.items after PUT. "
+            f"Current sourceIds: {fresh_ids}"
+        )
+    console.print(f"[green]✓ confirmed[/green] playlist {playlist_id} now references {case_id}")
 
 
 @playlists_app.command("delete")

@@ -65,9 +65,15 @@ The CLI's service token (`Tricentis_Cloud_API`) is 403'd on personal Local Runne
 
 1. Build/update artifacts with the CLI (service token is fine here).
 2. Trigger with `mcp__ToscaCloudMcpServer__RunPlaylist(playlistId, runOnAPersonalAgent=true)`.
-3. Poll with `mcp__ToscaCloudMcpServer__GetRecentRuns({nameFilter: "<exact playlist name including em-dash>"})` — `GetRecentRuns` with `stateFilter` alone returns ~10 IDs sorted alphabetically by UUID and is not reliable for locating your run.
-4. For the authoritative per-playlist pass/fail signal: `mcp__ToscaCloudMcpServer__GetRecentPlaylistRunLogs(playlistId)`.
+3. Poll with `mcp__ToscaCloudMcpServer__GetRecentRuns({nameFilter: "<exact playlist name including em-dash>"})` — `GetRecentRuns` with `stateFilter` alone returns ~10 IDs sorted alphabetically by UUID and is not reliable for locating your run. **Poll every 5–10 s**, not 60–120 s — typical single-case runs complete in 15–40 s. Never chain `sleep N && curl` in a retry loop (it burns the 5-min prompt-cache window and misses the result by 2–5 polls); use `run_in_background` + `Monitor`, or fall back to step 4.
+4. For the authoritative per-playlist pass/fail signal: `mcp__ToscaCloudMcpServer__GetRecentPlaylistRunLogs(playlistId)`. Use this as the primary signal when two consecutive `GetRecentRuns` polls with identical `nameFilter` return the same pre-existing set — your run's UUID sorts past the cap.
 5. For the per-step failure tree: `mcp__ToscaCloudMcpServer__GetFailedTestSteps({runIds: ["<executionId>"]})` — needs the **executionId** (from `GetRecentRuns`), not the `playlistRun.id` that `RunPlaylist` returns.
+
+**When the user says "mcp glitched" / "reloaded mcp"**: do **not** re-dispatch the playlist — the previously triggered run is still executing on the agent. Re-issue the last read-side MCP call once and continue from there.
+
+## Preserve the user's flow
+
+When a step fails, fix the step — do **not** replace the flow with a shortcut. If the user wrote a hover-→-submenu-→-click to reach a page, don't collapse it into a direct `OpenUrl` to the destination: the test is documenting a user journey, and the shortcut destroys the coverage. Only propose a flow change after at least three distinct root-cause fixes have failed, and always ask before applying it. The same applies to weakening a `Verify` step (see the no-defect-masking rule in `SKILL.md`).
 
 ## Output style
 

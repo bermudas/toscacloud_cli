@@ -16,6 +16,14 @@ python tosca_cli.py config test
 
 Config and token cache live in the project directory (`.env`, `token.json`) — never in `~/.tosca_cli`.
 
+The CLI's service-account only needs the `Tricentis_Cloud_API` clientId — do **not** swap in `E2G_Agents`, `Tosca_Server`, or `Tricentis_Hosted_E2G_Agents` when chasing 403s. Those are engine-internal identities and grant a different scope set (no delete, no private-agent dispatch, no log attachments); substituting them will not unlock the permission — it will just burn time. When the CLI gets a 403, the fix is either a Portal-UI action by the logged-in user, or a tenant-admin role grant on the existing Cloud-API role (see "Personal-agent runs need MCP" and the `cases delete` caveat in the Critical caveats table of `SKILL.md`).
+
+## Working-file convention
+
+Scratch JSON/Python files for TOSCA CLI work go under `.claude/tmp/` (gitignored), **not** `/tmp/`. Playwright MCP is sandboxed to the project root and cannot read `/tmp/`, and `/tmp/` is wiped across macOS reboots so your reproduction trail disappears. Use `.claude/tmp/<YYYY-MM-DD>-<intent>.json` (e.g. `.claude/tmp/2026-04-24-novartis-menu-v6.json`) and delete when the task lands.
+
+Never commit experimental agent or skill definitions (`.claude/agents/*.md`, `.claude/skills/*/SKILL.md`, `.github/agents/*.agent.md`) without explicit confirmation from the user — an earlier push accidentally checked `test-coder.agent.md` into `.github/agents/` and the file had to be removed from history. These are authored files, not artifacts: treat any new one under those paths as requiring review.
+
 ## Architecture
 
 Single file, no sub-packages:

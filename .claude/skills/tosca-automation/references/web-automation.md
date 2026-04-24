@@ -18,6 +18,26 @@
 > **`InnerText` is exact-match in TOSCA's Html engine.** A link that wraps additional text nodes (e.g. an `<a>` containing both a caption and a nested heading) has `innerText` equal to the concatenation of all descendant text — not just the visible caption. A short `InnerText="<caption>"` will not match. Drop `InnerText` from the TechnicalIds and use `Tag` + `HREF` + `ClassName` (or a unique `Title` attribute) instead.
 >
 > **Parent `visibility:hidden` propagates.** A mega-menu closed by default has its items rendered but hidden via parent `visibility:hidden` / `opacity:0`. TOSCA's default `IgnoreInvisibleHtmlElements=True` filters these out — your module-level selector finds the document but attribute lookup reports `"Could not find Link ..."`. Two fixes: (1) open the parent (click the menu trigger, then add a Wait + the hover/click step); (2) add `IgnoreInvisibleHtmlElements=False` as a Steering module parameter.
+>
+> **The Html scanner is viewport-scoped, not document-scoped.** A `Verify` on an `<h2>`, `<div>`, or any element below the fold fails with `Could not find …` even when the element exists in the DOM. Diagnostic — run before changing the selector:
+>
+> ```javascript
+> // in browser_evaluate, on the live page at the same viewport size as the agent (maximized ≈ 900–1080)
+> var sel = 'h2.stripe_title';
+> var vh  = window.innerHeight;
+> Array.from(document.querySelectorAll(sel)).map(function(el, i) {
+>   var r = el.getBoundingClientRect();
+>   return i + ': y=' + Math.round(r.y) + ' visible=' + (r.y >= 0 && r.y < vh);
+> }).join('\n');
+> ```
+>
+> If every match has `visible=false`, the element is below the fold — that is the failure, not the locator. `ScrollToFindElement=True` steering does **not** reliably reach far-below-the-fold content. Fixes in order of preference:
+>
+> 1. Prepend a `Send Keys (Keyboard)` step with `value: "{SENDKEYS[{PAGEDOWN}]}"` on a page-level element. Repeat until the target's `getBoundingClientRect().y` falls inside the viewport.
+> 2. Navigate directly to a fragment anchor when the page supports one: an `OpenUrl` to `…/page#section-id` skips the scroll question entirely.
+> 3. Pivot to `Verify JavaScript Result`: CDP `Runtime.evaluate` is document-scoped, so `return document.querySelectorAll('h2.stripe_title').length.toString()` returns the true count regardless of scroll position. See `standard-modules.md` for the module skeleton — remember to use **single quotes** inside the JS value (a `"` at the value root silently breaks the step).
+>
+> This is a distinct root cause from "scanner blind to body content" (observer-disabled case in `standard-modules.md`): viewport scoping applies even when the Tricentis Automation Extension is fully attached and the observer is healthy. Always check viewport first — cheapest diagnostic.
 
 ## Module structure
 
@@ -86,6 +106,8 @@ Scanned modules also carry a `SelfHealingData` steering param with hints about t
 | `<select>` | `Combobox` | `["{Select}"]` |
 | `<div>`/`<span>` container to verify | `Container` | — |
 | page root | `HtmlDocument` | — (module-level only) |
+
+> **Container nesting is NOT a DOM scope.** Nesting a Button inside a Container in the module tree affects only Steering-param inheritance — at runtime TBox resolves `moduleAttributeReference.id` globally against the document. If two matching buttons exist in different page regions you get *"Found multiple controls for Button '…'"* regardless of the parent Container. To discriminate sibling elements, embed the ancestor's class/ID in the child's own selector (e.g. `ClassName: "region-header lang-switch"` combining both), or pivot to `Verify JavaScript Result` with a scoped `document.querySelector('.region-header button.lang-switch')`.
 
 ## Value expression reference
 

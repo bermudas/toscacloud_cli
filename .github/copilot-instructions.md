@@ -63,6 +63,10 @@ client.e2g_url(path)           # /{spaceId}/_e2g/api/{path}            (executio
   - `GetRecentRuns({nameFilter: "<exact playlist name>"})` — returns executionIds only for matching playlist. The `nameFilter` must be **exact** including em-dash/en-dash characters (`—` is `\u2014`); partial substring matches return `[]`.
   - `GetFailedTestSteps({runIds: ["<executionId>"]})` — takes **executionId** (returned by `GetRecentRuns`), never the `playlistRun.id` returned by `RunPlaylist` (the latter errors with `"Run with the specified ID doesn't exist."`).
   - `GetRecentRuns({stateFilter})` without nameFilter returns ~10 executionIds sorted alphabetically by UUID, not by time — not reliable for locating your run.
+- **Polling cadence — 5-10 s, not 60-120 s**. Personal-agent single-case runs typically finish in 15-40 s. A 90 s sleep overshoots by 2-5 prompt-cache TTL windows (≈ 300 s) and burns a fresh cache fill every iteration. Never chain `sleep N && curl` retries — use a short polling loop or fall back to `GetRecentPlaylistRunLogs`.
+- **`GetRecentRuns` cap — capped at ~10, sorted alphabetically by UUID**. A newly dispatched run whose UUID sorts past the cap is **invisible** regardless of wait time, even with `nameFilter`. If two consecutive polls with identical `nameFilter` return the same pre-existing set, stop polling and pivot to `GetRecentPlaylistRunLogs(playlistId)` — it returns the latest per-playlist result regardless of UUID ordering.
+- **Preserve the user's flow, don't re-dispatch on environment hiccups.** When the user reports an environment failure (`"screen locked"`, `"VPN dropped"`, `"mcp glitched, reloaded"`), re-dispatch the **existing** playlist — do NOT re-edit test artifacts. The last known-good version in MBT is still valid, and the previous run may still be executing on the agent. When a step fails, fix the step — don't replace a hover→submenu→click user journey with a direct `OpenUrl` shortcut. The test documents the journey; shortcuts destroy the coverage. Only propose a flow change after ≥ 3 distinct root-cause fixes have failed, and ask first.
+- **Scratch files go under `.claude/tmp/`** (gitignored), **not `/tmp/`**. Playwright MCP is sandboxed to the project root and can't read `/tmp/`; `/tmp/` is also wiped across reboots so reproduction trails vanish. Use `.claude/tmp/<YYYY-MM-DD>-<intent>.json` for throwaway build scripts, step-dump JSON, PATCH probes, etc.
 
 ## Html engine runtime quirks
 
@@ -80,8 +84,31 @@ client.e2g_url(path)           # /{spaceId}/_e2g/api/{path}            (executio
 - **`ControlFlowItemV2 If` for optional elements**: works when the module-level `Title`/`Url` can cleanly miss (Verify evaluates `false`). Hard-fails when the document itself isn't found — narrow the module-level selector before relying on `If`.
 - **Scanned modules' `SelfHealingData`**: carries the page's title/URL at scan time. When reusing a scanned module on a different flow, drop the `SelfHealingData` steering param — stale hints interfere with document matching.
 - **Html module steering defaults that actually work**: `AllowedAriaControls` populated (standard aria list), `EnableSlotContentHandling=False`, `IgnoreInvisibleHtmlElements=True`. Empty `AllowedAriaControls` or `EnableSlotContentHandling=True` cause erratic element resolution.
+- **`{Click}` reports Succeeded but browser doesn't navigate** — Drupal/SPA mega-menu links: the step logs `[Succeeded] Click '…'` while the tab URL never changes, then the next module's `Url=` scope fails to find the tab. Per Tricentis best-practices KB5 #12, swap `value: "{Click}"` → `value: "X"` (direct click — invokes the DOM click handler without mouse emulation). Do **not** try `{LEFTCLICK}` — not a registered keyword, throws `[Exception]` (~0.07 s). Alternative for VJS path: `window.location.href = el.href` (bypasses event handlers that call `preventDefault()`).
+- **Html scanner is viewport-scoped, not document-scoped.** A `Verify` on any element below the fold fails with `Could not find …` even when `browser_evaluate('document.querySelectorAll(sel).length') ≥ 1`. `ScrollToFindElement=True` steering doesn't reliably help. Diagnostic: run `document.querySelector(sel).getBoundingClientRect().y` in `browser_evaluate`; if y ≥ window.innerHeight the element is below the fold. Fix order: (1) prepend `{SENDKEYS[{PAGEDOWN}]}` on a page element; (2) `OpenUrl` to a fragment anchor if available; (3) pivot to `Verify JavaScript Result` — CDP `Runtime.evaluate` is document-scoped. Distinct root cause from "scanner-blind" (observer disabled); always check viewport first.
+- **Module-level `Url` / `Title` must be `parameterType: "TechnicalId"`, not `"Configuration"`.** If created as `Configuration`, TOSCA silently ignores them for tab scoping — symptom is persistent *"More than one matching tab was found"* regardless of how precise the pattern is. Verify with `modules get --json <id>` → `parameters[].parameterType`. Fix in-place via `modules update`.
+- **`UseActiveTab = True` alone rejected on some tenants**: raises *"Specify at least one of the Search Criteria."*. Always pair with `Title=*<AppName>*` or `Url=https://<host>*`, or use `UseActiveTab=False` + Title/Url. Reliably working shape: `UseActiveTab=False` + `Title=*<AppName>*`.
+- **Container nesting does NOT scope attribute matching.** Nesting a Button attribute inside a Container attribute in the module tree only affects Steering-param inheritance — TBox resolves `moduleAttributeReference.id` globally against the document. If two matching buttons exist in different page regions you still get *"Found multiple controls for Button '…'"*. Discriminate in the child's own selector (combine ancestor class + child class in `ClassName`), or scope via `Verify JavaScript Result` → `document.querySelector('.region-header button.lang-switch')`.
+
+## VS Code Copilot-specific gotchas
+
+- **First-turn MCP-boot cancellation after VS Code reload.** If your first request in a fresh Chat window comes back with `result.errorDetails = {"code":"canceled"}` and `response = [{"kind":"mcpServersStarting"}]`, the TOSCA MCP server is still completing its PKCE/OAuth handshake. **Retry the request once** — do not re-dispatch playlists or re-author test cases; the prior request never executed. The handshake takes 3-8 s and is async; Copilot races it on the first turn.
+
+- **MCP vs CLI — capability split.** MCP write tools are **scaffolding-only**. Do not use `ScaffoldTestCase` when the user asks to `copy`/`clone`/`duplicate` a test case — it drops attribute bindings, `ControlFlowItemV2` nodes, and parameter values. Correct split:
+  - **MCP (read/dispatch/inspect)**: `SearchArtifacts`, `AnalyzeTestCaseItems`, `GetModulesSummary`, `RunPlaylist`, `GetRecentRuns`, `GetRecentPlaylistRunLogs`, `GetFailedTestSteps`, `ListSimulatorAgents`, `Delete*ById`.
+  - **CLI (writes with full fidelity)**: `cases clone`, `cases update --json-file`, `modules update --json-file`, `blocks update`, `cases patch`, `inventory move`, TSU export/import.
+  - **CLI (writes with care — confirm-GET required)**: `cases patch`, `inventory patch` — silent-no-op on unsupported ops.
+
+- **MCP tool naming convention.** Tools are `mcp__ToscaCloudMcpServer__<MethodName>` — **double underscore**, PascalCase server name, PascalCase method. Do not write `mcp_toscacloudmcp_*` in user-facing text or tool invocations — that's a Copilot-autocomplete mistake and will not resolve.
+
+- **Output discipline — no duplicate paragraphs inside a single turn.** Copilot Chat's retry/tool-loop orchestrator occasionally re-narrates the same analysis paragraph 5-8 times inside one assistant response (each repetition also lands in the next turn's context, inflating prompt cost). Emit each analysis once; between tool calls, keep pre-tool text to one short bullet or a single sentence. If you notice identical paragraphs appearing twice in your own draft, cut the duplicates before finalizing.
 
 ## Adding a new command — checklist
+
+1. Add `ToscaClient` method (docstring with HTTP verb + endpoint path).
+2. Add Typer command to the right `*_app` with `--json` flag and short `--help` text.
+3. Update `README.md` Command Reference for the relevant group.
+4. If a new API quirk is found, add it to the Known API Limitations table.
 
 1. Add `ToscaClient` method (docstring with HTTP verb + endpoint path).
 2. Add Typer command to the right `*_app` with `--json` flag and short `--help` text.

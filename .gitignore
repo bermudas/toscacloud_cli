@@ -23,6 +23,7 @@ build/
 
 # Scratch / dev probe scripts
 _probe.py
+.claude/tmp/
 
 # JUnit / result exports
 junit-results.xml
@@ -31,5 +32,9 @@ junit-results.xml
 .DS_Store
 
 .playwright-mcp/*
+.mcp.json
+.vscode/mcp.json
+
+.vscode/mcp.json
 .mcp.json
 .vscode/mcp.json

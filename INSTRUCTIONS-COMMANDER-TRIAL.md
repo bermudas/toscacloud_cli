@@ -4,6 +4,8 @@ Goal: confirm the new on-prem CLI can read your workspace, then **round-trip an 
 
 You only need one file: `tosca_commander_cli.py`. Drop it anywhere, install 4 Python packages, set up `.env`, run the steps, paste outputs back.
 
+**No Python on the test box?** Use the bundled `trial.ps1` instead — it's a self-contained PowerShell 5.1+ script that hits the same TCRS endpoints directly via `Invoke-RestMethod`. Reads the same `.env`. Skip step 2 below (no `pip install` needed) and run `.\trial.ps1` once with no parameters for discovery mode, then a second time with `-TestCaseId / -ModuleId / -TestCaseParentId / -ModuleParentId` for the round-trip. Outputs land in your console — paste them back the same way.
+
 ## What this trial does (and doesn't do)
 
 **Does**: reads two existing objects from your workspace (one TestCase + one Module it references), then writes **two new objects** alongside them with `_v2` and `_clone` suffixes — wiring the new TestCase to point at the new Module instead of the original.

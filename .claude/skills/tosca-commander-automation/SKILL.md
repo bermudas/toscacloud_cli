@@ -122,6 +122,55 @@ python tosca_commander_cli.py search tql '=>Subparts:TestCase' --workspace MyWs
 | Persist edits | `task workspace CheckInAll` — always after writes that the driver buffers |
 | Pre-execution approval | `approvals enable` → `approvals request <tcId>` → reviewer runs `approvals give <tcId>` → `task workspace CheckInAll` |
 
+## Round-trip pattern — recreate an object from a fetched body
+
+`objects get` returns a TCAPI representation that's a **superset** of what `objects create` accepts: it includes server-minted fields (`UniqueId`, `Revision`, audit timestamps, `NodePath`) that POST will reject if you send them back as-is. The CLI ships three flags on `objects create` that make round-tripping clean:
+
+| Flag | Effect |
+|---|---|
+| `--strip-server-fields` | Recursively removes `UniqueId`, `Revision`, `CreatedBy`, `CreatedAt`, `ModifiedBy`, `ModifiedAt`, `NodePath` from every dict in the body. Reference fields like `OwnerModuleReference` are NOT in this set — they hold *other* objects' UniqueIds and must survive. |
+| `--rename-suffix STR` | Appends STR to the root object's `Name` (e.g. `_clone_v1`). Required when posting back into the same parent — Tosca names must be unique within a parent. |
+| `--rewrite-ref OLD=NEW` | Repeatable. Replaces any string value equal to OLD with NEW anywhere in the body. Used for cross-object reference rewriting (swap a TestCase's module reference to a different module's UniqueId). |
+| `--show-body` | Prints the post-transformation body to stderr before POSTing — verify your transformations applied as expected. |
+
+**Recipe 1 — recreate a single object as a new sibling** (same workspace, no ref changes; module references stay pointing at the original modules):
+
+```bash
+python tosca_commander_cli.py objects get <srcId> --depth 5 > src.json
+python tosca_commander_cli.py objects create <parentId> --json-file src.json \
+    --strip-server-fields --rename-suffix "_clone"
+python tosca_commander_cli.py task workspace CheckInAll
+```
+
+**Recipe 2 — recreate a TestCase pointing at a freshly recreated Module copy** (proves the reference-rewriting story end-to-end):
+
+```bash
+# 1) Source IDs
+python tosca_commander_cli.py search tql '=>SUBPARTS:Module[Name="Login"]'    # → MOD_OLD
+python tosca_commander_cli.py search tql '=>SUBPARTS:TestCase[Name="LoginTest"]'  # → TC_OLD
+
+# 2) Recreate the Module first under the Modules folder
+python tosca_commander_cli.py objects get $MOD_OLD --depth 3 > mod.json
+python tosca_commander_cli.py objects create $MOD_PARENT --json-file mod.json \
+    --strip-server-fields --rename-suffix "_v2"
+# capture the new Module's UniqueId from the response → MOD_NEW
+
+# 3) Recreate the TestCase, swapping refs from MOD_OLD to MOD_NEW
+python tosca_commander_cli.py objects get $TC_OLD --depth 5 > tc.json
+python tosca_commander_cli.py objects create $TC_PARENT --json-file tc.json \
+    --strip-server-fields --rename-suffix "_clone" \
+    --rewrite-ref $MOD_OLD=$MOD_NEW
+
+# 4) Persist
+python tosca_commander_cli.py task workspace CheckInAll
+```
+
+**When the build body is wrong** (HTTP 400 on create): the API's error string usually names the offending field. The most common surprises are:
+- A reference field whose name *contains* `Id` but isn't a UniqueId (e.g. `LegacyId`) — these survive `--strip-server-fields` (correctly) but may need `--rewrite-ref` if the legacy values don't exist in the target.
+- A property the source had set that the target rejects because it depends on a workspace-scoped enum (e.g. `Owner`).
+
+Pass `--show-body` to print the post-transformation JSON to stderr and inspect what's about to land.
+
 ## TQL recipe library — execution history (the day-to-day workflow)
 
 The single highest-value type for a test automation engineer is **`ExecutionLogEntry`** — one record per executed TestCase. Properties confirmed from a 2026-vintage Tosca Server (community script `Achoo0-Adam/Tosca-TQL-Export-`):

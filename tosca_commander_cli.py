@@ -595,6 +595,57 @@ def _safe_call(label: str, fn, *args, **kwargs):
         _exit_err(f"{label}: connection error – {e}")
 
 
+# Server-minted fields TCAPI rejects (or silently overwrites) on create POST.
+# Stripping them recursively makes a body fetched via `objects get` round-trippable
+# back through `objects create`. Reference fields like `OwnerModuleReference` are
+# not in this set — they hold *other* objects' UniqueIds and must survive.
+SERVER_MINTED_FIELDS: set[str] = {
+    "UniqueId", "Revision",
+    "CreatedBy", "CreatedAt", "ModifiedBy", "ModifiedAt",
+    "NodePath",
+}
+
+
+def _strip_server_fields(obj):
+    """Recursively drop server-minted keys from every dict in the tree."""
+    if isinstance(obj, dict):
+        return {k: _strip_server_fields(v) for k, v in obj.items()
+                if k not in SERVER_MINTED_FIELDS}
+    if isinstance(obj, list):
+        return [_strip_server_fields(x) for x in obj]
+    return obj
+
+
+def _rewrite_refs(obj, mapping: dict[str, str]):
+    """Recursively replace any string value equal to a key in `mapping`.
+
+    Used for cross-object reference rewriting — e.g. swapping a TestCase's
+    `OwnerModuleReference` from the source Module's UniqueId to the freshly
+    created copy's UniqueId.
+    """
+    if isinstance(obj, dict):
+        return {k: _rewrite_refs(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_rewrite_refs(x, mapping) for x in obj]
+    if isinstance(obj, str) and obj in mapping:
+        return mapping[obj]
+    return obj
+
+
+def _parse_rewrite_pairs(pairs: list[str]) -> dict[str, str]:
+    """Parse repeated --rewrite-ref OLD=NEW flags into a {OLD: NEW} dict."""
+    out: dict[str, str] = {}
+    for raw in pairs:
+        if "=" not in raw:
+            _exit_err(f"--rewrite-ref expects 'OLD=NEW', got: {raw!r}")
+        old, _, new = raw.partition("=")
+        old, new = old.strip(), new.strip()
+        if not old or not new:
+            _exit_err(f"--rewrite-ref: empty side in {raw!r}")
+        out[old] = new
+    return out
+
+
 # ---------------------------------------------------------------------------
 # `workspace` subcommands
 # ---------------------------------------------------------------------------
@@ -669,12 +720,67 @@ def objects_create(
                                    help="Path to a JSON body: {\"TypeName\":..., \"Name\":..., \"Properties\":{...}}."),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w",
                                             envvar="TOSCA_COMMANDER_WORKSPACE"),
+    strip_server_fields: bool = typer.Option(
+        False, "--strip-server-fields",
+        help="Recursively remove server-minted keys (UniqueId, Revision, CreatedBy/At, "
+             "ModifiedBy/At, NodePath) from the body before POST. Required when round-tripping "
+             "a body fetched via `objects get`.",
+    ),
+    rename_suffix: Optional[str] = typer.Option(
+        None, "--rename-suffix",
+        help="Append this string to the root object's Name (e.g. '_clone_v1'). "
+             "Useful for round-tripping an existing object as a new sibling without name collision.",
+    ),
+    rewrite_ref: list[str] = typer.Option(
+        [], "--rewrite-ref",
+        help="Repeatable: 'OLD=NEW'. Replaces any string value equal to OLD with NEW anywhere "
+             "in the body — handles cross-object reference rewriting (e.g. swapping a TestCase's "
+             "module reference from the source Module's UniqueId to a freshly created copy's).",
+    ),
+    show_body: bool = typer.Option(
+        False, "--show-body",
+        help="Print the post-transformation body to stderr before POSTing. Handy for verifying "
+             "--strip / --rename / --rewrite-ref applied as expected.",
+    ),
 ):
-    """Create a new object under the given parent. Body shape: TCAPI object representation."""
+    """Create a new object under the given parent. Body shape: TCAPI object representation.
+
+    Round-trip pattern (recreate an existing object as a new sibling):
+
+        objects get <src> --depth 5 > src.json
+        objects create <parent> --json-file src.json \\
+            --strip-server-fields --rename-suffix "_clone"
+
+    Cross-reference rewrite (e.g. point a recreated TestCase at a freshly created Module copy):
+
+        # 1) recreate the Module first
+        objects get <srcModuleId> --depth 3 > mod.json
+        objects create <modParent> --json-file mod.json \\
+            --strip-server-fields --rename-suffix "_v2"
+        # 2) recreate the TestCase, swapping the original module ref to the new one
+        objects get <srcTestCaseId> --depth 5 > tc.json
+        objects create <tcParent> --json-file tc.json \\
+            --strip-server-fields --rename-suffix "_clone" \\
+            --rewrite-ref <srcModuleId>=<newModuleId>
+    """
     ws = _ws_or_die(workspace)
     if not json_file.exists():
         _exit_err(f"--json-file not found: {json_file}")
     body = json.loads(json_file.read_text())
+
+    if strip_server_fields:
+        body = _strip_server_fields(body)
+    if rewrite_ref:
+        body = _rewrite_refs(body, _parse_rewrite_pairs(rewrite_ref))
+    if rename_suffix:
+        if not isinstance(body, dict) or "Name" not in body:
+            _exit_err("--rename-suffix: body has no top-level 'Name' field.")
+        body["Name"] = str(body["Name"]) + rename_suffix
+
+    if show_body:
+        console.print("[dim]── post-transformation body ──[/dim]", soft_wrap=False, highlight=False)
+        sys.stderr.write(json.dumps(body, indent=2, default=str) + "\n")
+
     client = ToscaCommanderClient()
     _output_json(_safe_call(f"create under {parent_id}", client.object_create, ws, parent_id, body))
 

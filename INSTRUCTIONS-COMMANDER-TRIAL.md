@@ -4,6 +4,12 @@ Goal: confirm the new on-prem CLI can read your workspace, then **round-trip an 
 
 You only need one file: `tosca_commander_cli.py`. Drop it anywhere, install 4 Python packages, set up `.env`, run the steps, paste outputs back.
 
+## What this trial does (and doesn't do)
+
+**Does**: reads two existing objects from your workspace (one TestCase + one Module it references), then writes **two new objects** alongside them with `_v2` and `_clone` suffixes — wiring the new TestCase to point at the new Module instead of the original.
+
+**Doesn't**: no modifications or deletes to existing artifacts, no test execution, no permission/workspace-setting changes. Worst-case footprint is two extra named objects in your workspace, which you can remove afterwards with `python tosca_commander_cli.py objects delete <UniqueId>`.
+
 ## Prerequisites
 
 - Python 3.10 or newer

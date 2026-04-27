@@ -106,6 +106,13 @@ function Get-AuthHeaders {
         return @{ Mode = 'negotiate'; Headers = @{}; UseDefaultCredentials = $true }
     }
 
+    if ($mode -eq 'ntlm') {
+        if (-not ($user -and $pass)) { throw "TOSCA_COMMANDER_AUTH=ntlm requires TOSCA_COMMANDER_USER and TOSCA_COMMANDER_PASSWORD." }
+        $secPass = ConvertTo-SecureString $pass -AsPlainText -Force
+        $cred    = New-Object System.Management.Automation.PSCredential($user, $secPass)
+        return @{ Mode = 'ntlm'; Headers = @{}; Credential = $cred }
+    }
+
     if ($mode -eq 'pat' -or ($mode -eq 'auto' -and $token)) {
         if (-not $token) { throw "TOSCA_COMMANDER_AUTH=pat requires TOSCA_COMMANDER_TOKEN." }
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(":$token"))
@@ -150,6 +157,7 @@ function Invoke-Tcrs {
         Headers = $Auth.Headers + @{ Accept = 'application/json' }
     }
     if ($Auth.UseDefaultCredentials) { $args.UseDefaultCredentials = $true }
+    if ($Auth.Credential)            { $args.Credential            = $Auth.Credential }
     if ($null -ne $Body) {
         $args.Body        = ($Body | ConvertTo-Json -Depth 30 -Compress)
         $args.ContentType = 'application/json'

@@ -20,22 +20,15 @@ You only need one file: `tosca_commander_cli.py`. Drop it anywhere, install 4 Py
    pip install httpx typer rich python-dotenv
    ```
 
-3. Create a file named `.env` next to the script. Replace the placeholders, keep ONE auth combo (delete or comment the others):
+3. Copy the supplied `.env.commander.example` to `.env` and fill in your values:
 
    ```
-   TOSCA_COMMANDER_BASE_URL=http://your-tosca-server:1111
-   TOSCA_COMMANDER_WORKSPACE=YourWorkspace
-
-   # Auth A — PAT (recommended; from Tosca Server → Profile → Personal Access Tokens)
-   TOSCA_COMMANDER_TOKEN=<paste your PAT base64 blob here>
-
-   # Auth B — Basic / AD (multi-user workspace)
-   #TOSCA_COMMANDER_USER=DOMAIN\you
-   #TOSCA_COMMANDER_PASSWORD=
-
-   # Auth C — IIS Windows Auth (also run: pip install requests-negotiate-sspi)
-   #TOSCA_COMMANDER_AUTH=negotiate
+   cp .env.commander.example .env
+   # then edit .env: set TOSCA_COMMANDER_BASE_URL, TOSCA_COMMANDER_WORKSPACE,
+   # and exactly one auth combo (PAT, Basic/AD, OAuth2, Negotiate, or NTLM).
    ```
+
+   PowerShell equivalent: `Copy-Item .env.commander.example .env; notepad .env`
 
 ## Trial (5 minutes — please send back every numbered step's output)
 

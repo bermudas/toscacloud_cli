@@ -179,6 +179,42 @@ function Remove-ServerFields {
     return $Obj
 }
 
+function Get-OwnerUniqueId {
+    # Probe common field names that hold the parent reference. Tosca versions
+    # have used different names over the years; try them in order of frequency.
+    param($Obj)
+    foreach ($key in 'OwnerUniqueId','ParentUniqueId','OwnerId','ParentId','Parent') {
+        if ($Obj -and $Obj.PSObject.Properties[$key]) {
+            $v = $Obj.PSObject.Properties[$key].Value
+            if ($v -is [string] -and $v) { return $v }
+            if ($v -and $v.UniqueId)      { return $v.UniqueId }
+        }
+    }
+    return $null
+}
+
+function Find-ModuleRefs {
+    # Walks an arbitrary deserialized JSON tree looking for property values
+    # that (a) live under a key whose name contains 'Module' and (b) look
+    # like a Tosca UniqueId (26-char Crockford base32). Returns deduped strings.
+    param($Obj, [System.Collections.ArrayList]$Out = $null)
+    if ($null -eq $Out) { $Out = New-Object System.Collections.ArrayList }
+    if ($null -eq $Obj) { return $Out }
+    if ($Obj -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($p in $Obj.PSObject.Properties) {
+            if ($p.Name -like '*Module*' -and $p.Value -is [string] `
+                -and $p.Value -match '^[0-9A-HJKMNP-TV-Z]{26}$' `
+                -and -not $Out.Contains($p.Value)) {
+                $null = $Out.Add($p.Value)
+            }
+            Find-ModuleRefs $p.Value $Out | Out-Null
+        }
+    } elseif ($Obj -is [System.Collections.IList]) {
+        foreach ($it in $Obj) { Find-ModuleRefs $it $Out | Out-Null }
+    }
+    return $Out
+}
+
 function Edit-Refs {
     param($Obj, [hashtable]$Map)
     if ($null -eq $Obj) { return $null }
@@ -243,28 +279,72 @@ if (-not $rootId) { throw "Could not resolve project-root UniqueId from response
 
 if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $ModuleParentId) {
     Write-Host ""
-    Write-Host "DISCOVERY MODE — re-run with -TestCaseId / -ModuleId / -TestCaseParentId / -ModuleParentId set." -ForegroundColor Magenta
-
-    Write-Host ""
-    Write-Host "[3] TQL =>SUBPARTS:TestCase  (first 5)" -ForegroundColor Yellow
+    Write-Host "DISCOVERY MODE — finding TestCases that reference Modules and resolving their parents..." -ForegroundColor Magenta
     Write-Host "  project root UniqueId = $rootId"
 
+    Write-Host ""
+    Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 20 to find 5 with Module refs)" -ForegroundColor Yellow
     $tcs = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$rootId/task/search?tqlString=%3D%3ESUBPARTS%3ATestCase"
-    $tcs | Select-Object -First 5 | ForEach-Object {
-        "  TC  {0,-30}  UniqueId={1}" -f $_.Name, $_.UniqueId
+
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($tc in @($tcs | Select-Object -First 20)) {
+        if ($candidates.Count -ge 5) { break }
+        $tcId = if ($tc.UniqueId) { $tc.UniqueId } else { $tc.Id }
+        if (-not $tcId) { continue }
+
+        try {
+            $tcFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${tcId}?depth=5"
+        } catch {
+            Write-Host "  skip $($tc.Name) — GET failed" -ForegroundColor DarkGray
+            continue
+        }
+
+        $modRefs = Find-ModuleRefs $tcFull
+        if (-not $modRefs -or $modRefs.Count -eq 0) { continue }
+
+        $modId = $modRefs[0]
+        try {
+            $modFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${modId}?depth=0"
+        } catch { continue }
+
+        $tcParent  = Get-OwnerUniqueId $tcFull
+        $modParent = Get-OwnerUniqueId $modFull
+        if (-not $tcParent -or -not $modParent) {
+            Write-Host "  skip $($tc.Name) — could not resolve parent UniqueId" -ForegroundColor DarkGray
+            continue
+        }
+
+        $null = $candidates.Add([PSCustomObject]@{
+            '#'           = $candidates.Count + 1
+            'TestCase'    = $tcFull.Name
+            'TC_Id'       = $tcId
+            'TC_Parent'   = $tcParent
+            'Module'      = $modFull.Name
+            'MOD_Id'      = $modId
+            'MOD_Parent'  = $modParent
+        })
+        Write-Host "  found candidate $($candidates.Count): $($tcFull.Name) → $($modFull.Name)" -ForegroundColor DarkGreen
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Host ""
+        Write-Host "No TestCases with Module references found in the first 20 results." -ForegroundColor Red
+        Write-Host "Try a workspace with active web/SAP/API automation, or pass IDs manually."
+        return
     }
 
     Write-Host ""
-    Write-Host "[4] TQL =>SUBPARTS:Module  (first 5)" -ForegroundColor Yellow
-    $mods = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$rootId/task/search?tqlString=%3D%3ESUBPARTS%3AModule"
-    $mods | Select-Object -First 5 | ForEach-Object {
-        "  MOD {0,-30}  UniqueId={1}" -f $_.Name, $_.UniqueId
-    }
+    Write-Host "Phase-2-ready candidates:" -ForegroundColor Cyan
+    $candidates | Format-Table -AutoSize | Out-String | Write-Host
 
+    Write-Host "Copy ONE line below into PowerShell to run Phase 2 on the matching row:" -ForegroundColor Magenta
     Write-Host ""
-    Write-Host "Pick one TestCase that uses Module references (NodePath should reveal the parent)" -ForegroundColor Magenta
-    Write-Host "Pick one Module that the chosen TestCase actually references" -ForegroundColor Magenta
-    Write-Host "Then re-run:  .\trial.ps1 -TestCaseId <TC> -ModuleId <MOD> -TestCaseParentId <TCParent> -ModuleParentId <MODParent>"
+    foreach ($c in $candidates) {
+        $cmd = ".\trial.ps1 -TestCaseId {0} -ModuleId {1} -TestCaseParentId {2} -ModuleParentId {3}" -f `
+               $c.TC_Id, $c.MOD_Id, $c.TC_Parent, $c.MOD_Parent
+        Write-Host "  # row $($c.'#'): $($c.TestCase) → $($c.Module)" -ForegroundColor DarkGray
+        Write-Host "  $cmd" -ForegroundColor Yellow
+    }
     return
 }
 

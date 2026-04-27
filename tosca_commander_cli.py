@@ -870,14 +870,24 @@ def task_run(
         except ToscaCommanderError as e:
             console.print(f"[yellow]poll error[/yellow] HTTP {e.status} – {e.body[:120]}")
             continue
-        # State property location differs per Tosca version; show whatever the server returns.
-        state = (obj.get("Properties") or {}).get("ActualLogState") \
-                or (obj.get("Properties") or {}).get("Status") \
-                or (obj.get("Properties") or {}).get("Result")
+        # State property location differs per Tosca version. ExecutionList carries
+        # the rolled-up state under various keys; ExecutionLogEntry uses
+        # ExecutionStatus. Probe all known names.
+        props = obj.get("Properties") or {}
+        state = (
+            props.get("ActualLogState")
+            or props.get("ExecutionStatus")
+            or props.get("Status")
+            or props.get("Result")
+            or props.get("LastExecutionStatus")
+        )
         if state and state != last_state:
             console.print(f"[cyan]state →[/cyan] {state}")
             last_state = state
-        if state and str(state).lower() in {"passed", "failed", "completedwithfailure", "completed"}:
+        if state and str(state).lower() in {
+            "passed", "failed", "skipped", "notexecuted",
+            "completed", "completedwithfailure",
+        }:
             console.print(f"[bold]Final state:[/bold] {state}")
             _output_json(obj)
             return
@@ -937,10 +947,13 @@ def files_logs(
     client = ToscaCommanderClient()
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # The walk root may be either an ExecutionList, an ExecutionLogEntry, or any
+    # ancestor folder — TQL =>SUBPARTS recurses through the whole subtree, so a
+    # single query covers all three cases.
     if extension == "*":
-        tql = "=>Subparts:AttachedExecutionLogFile"
+        tql = "=>SUBPARTS:AttachedExecutionLogFile"
     else:
-        tql = f'=>Subparts:AttachedExecutionLogFile[FileExtension=="{extension}"]'
+        tql = f'=>SUBPARTS:AttachedExecutionLogFile[FileExtension="{extension}"]'
 
     found = _safe_call("tql ExecutionLog files", client.tql_search, ws, exec_log_id, tql)
     items = found if isinstance(found, list) else (found.get("items") or found.get("Items") or [])

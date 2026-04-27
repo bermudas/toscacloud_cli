@@ -39,7 +39,7 @@ Set in `.env`. The CLI's `_select_auth()` picks the first matching combo unless 
 | Mode | Env vars | Notes |
 |---|---|---|
 | `basic` (also AD) | `TOSCA_COMMANDER_USER` + `TOSCA_COMMANDER_PASSWORD` | Works for multi-user workspaces backed by AD; just feed `DOMAIN\user`. |
-| `pat` | `TOSCA_COMMANDER_TOKEN` | Tricentis Server Repository workspaces. Sent as `Basic base64(":<token>")`. |
+| `pat` | `TOSCA_COMMANDER_TOKEN` | Tricentis Server Repository workspaces. **A Tosca Server PAT is itself a base64-encoded JSON blob** (`{ClientId, ClientSecret, Scopes[]}`) — paste it verbatim from the Tosca Server profile page; do not decode/re-encode. The CLI sends it as `Basic base64(":<token>")` per TCRS convention. The blob's embedded `Scopes[]` enumerates every Tosca Server REST microservice the token may access (`DexApi`, `FileServiceApi`, `ProjectServiceApi`, `MbtServiceApi`, `ToscaAutomationObjectServiceApi`, `ExecutionResultServiceApi`, `RpaApiGatewayApi`, `LiveCompareServiceApi`, `LicenseAdministrationApi`, …) — useful for understanding what other services the same PAT could later unlock (Phase 2: AOS, FileService). |
 | `client-creds` | `TOSCA_COMMANDER_CLIENT_ID` + `_CLIENT_SECRET` | OAuth2 against `<server>/tua/connect/token`. |
 | `negotiate` | `TOSCA_COMMANDER_AUTH=negotiate` | IIS Windows Auth (NTLM/Kerberos via SSPI). Extra: `pip install requests-negotiate-sspi`. Windows-only. |
 | `ntlm` | `TOSCA_COMMANDER_AUTH=ntlm` + USER + PASSWORD | Explicit-cred NTLM. Extra: `pip install httpx-ntlm`. |
@@ -55,9 +55,13 @@ The TCRS surface has no listing endpoint for arbitrary types. Use **TQL** (Trice
 python tosca_commander_cli.py workspace project-root
 
 # 2) TQL-search for artifacts. Default root = project root.
-python tosca_commander_cli.py search tql '=>Subparts:TestCase[Status=="Planned"]'
-python tosca_commander_cli.py search tql '=>Subparts:Module[Name=="Login"]'
-python tosca_commander_cli.py search tql '=>Subparts:ExecutionList'
+#    Convention: UPPERCASE axis names (=>SUBPARTS), PascalCase type names (TestCase),
+#    PascalCase property names ([Status="Planned"]). TQL keywords are case-insensitive,
+#    but UPPERCASE is the community style — keeps your queries copy-pasteable
+#    alongside Tricentis sample scripts.
+python tosca_commander_cli.py search tql '=>SUBPARTS:TestCase[Status="Planned"]'
+python tosca_commander_cli.py search tql '=>SUBPARTS:Module[Name="Login"]'
+python tosca_commander_cli.py search tql '=>SUBPARTS:ExecutionList'
 
 # 3) Get a specific object's full representation.
 python tosca_commander_cli.py objects get <UniqueId> --depth 2
@@ -118,6 +122,85 @@ python tosca_commander_cli.py search tql '=>Subparts:TestCase' --workspace MyWs
 | Persist edits | `task workspace CheckInAll` — always after writes that the driver buffers |
 | Pre-execution approval | `approvals enable` → `approvals request <tcId>` → reviewer runs `approvals give <tcId>` → `task workspace CheckInAll` |
 
+## TQL recipe library — execution history (the day-to-day workflow)
+
+The single highest-value type for a test automation engineer is **`ExecutionLogEntry`** — one record per executed TestCase. Properties confirmed from a 2026-vintage Tosca Server (community script `Achoo0-Adam/Tosca-TQL-Export-`):
+
+| Property | Type | Notes |
+|---|---|---|
+| `Name` | string | Display name of the run |
+| `NodePath` | string | Slash-delimited path inside the workspace (`/ExecutionLists/Sprint 42/My Test Run`) |
+| `UniqueId` | 26-char Crockford base32 (ULID) | e.g. `01KF3FGGNNCC98DADNTGARBQAB` — same encoding as Cloud ULIDs |
+| `ExecutionStatus` | enum | `Passed` \| `Failed` \| `Skipped` \| `NotExecuted` (others may exist) |
+| `TestCaseName` / `TestCaseUniqueId` | strings | The TestCase that produced this log |
+| `StartedAt` / `EndedAt` | ISO date | Use ISO `YYYY-MM-DD` literals in TQL filters |
+| `Duration` | seconds | |
+| `ExecutionEnvironment` | string | Free-text per the run's config |
+| `ExecutionListName` / `ExecutionListUniqueId` | strings | Parent ExecutionList |
+| `CreatedBy` / `CreatedAt` / `ModifiedBy` / `ModifiedAt` | audit fields | |
+| `Description` / `Revision` | strings | |
+
+The screenshot/log files for a given entry are reachable via the `Subparts` axis:
+
+```
+=>SUBPARTS:AttachedExecutionLogFile[FileExtension="png"]
+=>SUBPARTS:AttachedExecutionLogFile[FileExtension="txt"]
+=>SUBPARTS:AttachedExecutionLogFile          # all of them
+```
+
+**Ready-to-paste TQL** (root: project root unless otherwise noted):
+
+```bash
+# All execution history (warning: large workspaces — bound by date below).
+python tosca_commander_cli.py search tql '=>SUBPARTS:ExecutionLogEntry'
+
+# Failures only — the most common diagnostic query
+python tosca_commander_cli.py search tql '=>SUBPARTS:ExecutionLogEntry[ExecutionStatus="Failed"]'
+
+# Yesterday's runs (ISO date literal, no quotes around the date)
+python tosca_commander_cli.py search tql "=>SUBPARTS:ExecutionLogEntry[StartedAt>='2026-04-26' AND StartedAt<='2026-04-27']"
+
+# All runs of a specific TestCase by name
+python tosca_commander_cli.py search tql '=>SUBPARTS:ExecutionLogEntry[TestCaseName="Login flow"]'
+
+# Combine: failures of a specific TestCase since a date
+python tosca_commander_cli.py search tql "=>SUBPARTS:ExecutionLogEntry[TestCaseName='Login flow' AND ExecutionStatus='Failed' AND StartedAt>='2026-04-01']"
+
+# Top-level ExecutionLists (the containers you can `task run`)
+python tosca_commander_cli.py search tql '=>SUBPARTS:ExecutionList'
+
+# Author-side discovery: TestCases by status / by parent folder
+python tosca_commander_cli.py search tql '=>SUBPARTS:TestCase[Status="Planned"]'
+python tosca_commander_cli.py search tql '=>SUBPARTS:Module[Name="Login"]'
+
+# Pull the screenshot files from a single failed run
+python tosca_commander_cli.py files logs <ExecutionLogEntry-UniqueId> --ext png
+
+# Pull every attached file (logs.txt, screenshots, …) from an ExecutionList tree
+python tosca_commander_cli.py files logs <ExecutionList-UniqueId> --ext '*'
+```
+
+**TQL syntax notes**:
+- Axes (`SUBPARTS`, `PARTS`, `OBJECT`) are **case-insensitive** but UPPERCASE is the convention everyone copies from.
+- Type names (`ExecutionLogEntry`, `TestCase`) are PascalCase.
+- Property comparators accept both `=` and `==`; quoted (`"X"`) and unquoted (`X`) literals both work for string equality. **For date literals, do not quote** — `StartedAt>=2026-04-01` works; `StartedAt>='2026-04-01'` works; bare `StartedAt>=2026/04/01` may also work depending on Tosca version (ISO-dash format is the safest).
+- Combine clauses with `AND` / `OR` (uppercase).
+- Predicates can chain: `[Status="Planned"] AND [Owner="alice"]` is valid.
+- Use single quotes inside double-quoted shell args (or vice versa) to avoid shell-escaping pain.
+
+## Server-side troubleshooting (no REST endpoint)
+
+Some operational signals **cannot** be retrieved via TCRS — they live on the server's filesystem. Don't waste time hunting a non-existent REST route for these:
+
+| What | Where (on the Tosca Server host) | Notes |
+|---|---|---|
+| Tosca Server **service logs** (gateway, AOS, DEX, FileService, MBT, ProjectService, …) | `%PROGRAMDATA%\TRICENTIS\ToscaServer\Logs\<ServiceName>\` | Per-service folders; rotated automatically. **No REST endpoint exposes these** — by design. To collect them, run `Achoo0-Adam/ToscaServerLogCapture` (PowerShell, on the server) or grab the folder over RDP/SMB. |
+| Tosca **support logs** (Commander, Designer, Studio crash dumps & misc) | `%PROGRAMDATA%\TRICENTIS\Logs\` | Same access pattern — filesystem only. |
+| **Workspace files** (.tws) | `<WorkspaceBasePath>\<WorkspaceName>\<WorkspaceName>.tws` | The path configured in `appsettings.json` of `Tricentis.Tosca.RestApiService`. The workspace name in CLI commands maps to the folder name, **not** the `.tws` file name (though typically they match). |
+| **TCRS REST API config** | `C:\Program Files (x86)\TRICENTIS\Tosca Server\RestApiService\appsettings.json` | Restart the `Tricentis.Tosca.RestApiService` Windows service after edits. Cache settings live in the service's `Web.config` (see "TCAPI instance caching" caveat). |
+
+**Execution logs (TestCase results) are different from server service logs** — they ARE accessible via REST as `ExecutionLogEntry` objects + their `Subparts:AttachedExecutionLogFile` (KB0021775). The `commander files logs <ExecutionLogEntry-id>` command wraps that walk.
+
 ## Cross-reference
 
 - Source of REST endpoint surface: `documentation.tricentis.com/devcorner/2024.1/tcrsapi/` (REST API / Requests / Object revisions / Caching).
@@ -125,3 +208,5 @@ python tosca_commander_cli.py search tql '=>Subparts:TestCase' --workspace MyWs
 - Screenshot retrieval pattern: KB0021775.
 - AOS scheduling pattern (Phase 2 candidate, **out of this skill**): KB0019429.
 - The konopski/tosca-commander-api Jython wrapper covers the same endpoints and is a good cross-reference for body shapes.
+- The Achoo0-Adam/Tosca-TQL-Export- PowerShell script is the source for the `ExecutionLogEntry` property table and the recipe library above. It uses TCAPI .NET assemblies directly, **not** REST — useful as a property reference, not a transport reference.
+- The Achoo0-Adam/ToscaServerLogCapture PowerShell script is the source for the server-side log path layout. It is purely filesystem-based and runs on the server itself.

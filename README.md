@@ -1,10 +1,33 @@
-# TOSCA Cloud CLI
+# TOSCA Cloud + Commander CLIs
 
-An AI-native command-line interface for Tricentis TOSCA Cloud.
+Two Python command-line interfaces for Tricentis TOSCA, sharing one repo:
 
-Covers seven API surfaces: Identity, MBT/Builder (v2), Playlists (v2), Inventory (v3 + v1 undocumented folder operations), Simulations (v1), and Reuseable Test Step Blocks (MBT v2).
+- **`tosca_cli.py`** — Tricentis **TOSCA Cloud** (multi-tenant SaaS at `*.my.tricentis.com`). OAuth2 client_credentials. Covers Identity, MBT/Builder v2, Playlists v2, Inventory v3 + v1 (undocumented folder ops), Simulations v1, Reuseable Test Step Blocks.
+- **`tosca_commander_cli.py`** — Tricentis **TOSCA Commander** (on-prem REST Webservice at `/rest/toscacommander`). Pluggable auth: Basic / PAT / OAuth2 client-creds / Negotiate (NTLM-Kerberos via SSPI, optional dep) / explicit-cred NTLM (optional dep). Covers workspace lifecycle, object CRUD, TQL search, task execution (incl. local `Run`), file/screenshot retrieval, pre-execution approval workflow.
+
+The two products share branding only — different REST surfaces, ID models, and auth.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Quick start — Commander CLI (on-prem)
+
+```bash
+source .venv/bin/activate
+cp .env.example .env  &&  edit .env (set TOSCA_COMMANDER_BASE_URL + auth)
+python tosca_commander_cli.py config test --workspace MyWorkspace
+python tosca_commander_cli.py search tql '=>Subparts:TestCase' --workspace MyWorkspace
+python tosca_commander_cli.py task run <execListId> --wait
+python tosca_commander_cli.py files logs <execLogId> --ext png
+```
+
+For optional Windows authentication:
+
+```bash
+pip install requests-negotiate-sspi   # IIS Windows Auth (NTLM/Kerberos via SSPI)
+pip install httpx-ntlm                # explicit-cred NTLM cross-platform
+```
+
+Full skill reference: `.claude/skills/tosca-commander-automation/SKILL.md`.
 
 ---
 

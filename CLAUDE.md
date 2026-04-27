@@ -1,9 +1,16 @@
-# TOSCA Cloud CLI — Project Guide for Claude
+# TOSCA Cloud + Commander CLIs — Project Guide for Claude
 
 ## What this project is
 
-A Python CLI (`tosca_cli.py`) for Tricentis TOSCA Cloud REST APIs. Single-file, no hidden packages.
-Covers: Identity, MBT/Builder v2 (test cases, modules, reuseable blocks), Playlists v2, Inventory v3 + v1 (undocumented folder ops), Simulations v1.
+Two sibling Python CLIs in one repo, sharing only Rich/Typer conventions:
+
+- **`tosca_cli.py`** — Tricentis **TOSCA Cloud** (multi-tenant SaaS at `*.my.tricentis.com`). OAuth2 client_credentials. Single file, no hidden packages.
+  Covers: Identity, MBT/Builder v2 (test cases, modules, reuseable blocks), Playlists v2, Inventory v3 + v1 (undocumented folder ops), Simulations v1.
+
+- **`tosca_commander_cli.py`** — Tricentis **TOSCA Commander** (on-prem REST Webservice / TCRS, hosted by `Tricentis.Tosca.RestApiService` at `/rest/toscacommander`). Pluggable auth: Basic / PAT / OAuth2 client-creds / Negotiate (NTLM-Kerberos via SSPI, optional dep) / explicit-cred NTLM (optional dep).
+  Covers: workspace lifecycle, object CRUD, TQL search, generic + per-object tasks (incl. ExecutionList `Run`), file/screenshot retrieval (KB0021775 pattern), pre-execution approval workflow.
+
+The two products share **branding only** — different REST surfaces, ID models (Cloud entityId vs Commander 32-char UniqueId), and auth. Don't cross-reference IDs between them.
 
 ## Setup
 
@@ -194,15 +201,17 @@ python tosca_cli.py playlists list
 
 | File | Purpose |
 |------|---------|
-| `tosca_cli.py` | Entire CLI — `ToscaClient` + all Typer commands |
-| `.env` / `.env.example` | Credentials (`.env` is gitignored) |
+| `tosca_cli.py` | Cloud CLI — `ToscaClient` + all Typer commands |
+| `tosca_commander_cli.py` | On-prem CLI — `ToscaCommanderClient` + all Typer commands. Pluggable auth (Basic / PAT / OAuth2 / Negotiate / NTLM). Independent from `tosca_cli.py`; shares `.env` file but with `TOSCA_COMMANDER_*` keys. |
+| `.env` / `.env.example` | Credentials (`.env` is gitignored). Holds both Cloud (`TOSCA_*`) and Commander (`TOSCA_COMMANDER_*`) settings; only the keys for the surface you're using need to be set. |
 | `token.json` | Cached OAuth2 token (gitignored) |
-| `requirements.txt` | Runtime dependencies |
+| `requirements.txt` | Runtime dependencies — Cloud + Commander core. Optional Commander-only extras: `requests-negotiate-sspi` (Negotiate auth) and `httpx-ntlm` (explicit-cred NTLM); install only when needed. |
 | `swaggers/` | Tenant-specific swagger exports for reference (gitignored) |
 | `README.md` | User-facing docs |
 | `CLAUDE.md` | This file — project guide for Claude Code |
 | `.github/agents/tosca.agent.md` | TOSCA Automation agent instructions (full reference: decision tree, CLI commands, caveats, Web + SAP how-to) |
-| `.claude/skills/tosca-automation/SKILL.md` | Agent Skills package (agentskills.io spec) — project skill, auto-discovered by Claude Code |
+| `.claude/skills/tosca-automation/SKILL.md` | Agent Skills package (agentskills.io spec) — Cloud project skill, auto-discovered by Claude Code |
+| `.claude/skills/tosca-commander-automation/SKILL.md` | Sibling skill — on-prem TCRS workflow (workspace, objects, TQL, run, files/screenshots, approvals). Mirror of `tosca-automation` for Commander. |
 | `.claude/skills/tosca-automation/references/web-automation.md` | Html engine how-to (module structure, standard module IDs, Playwright discovery, 4-folder pattern) |
 | `.claude/skills/tosca-automation/references/sap-automation.md` | SapEngine how-to (standard module IDs, Precondition block, RelativeId patterns, ControlFlowItemV2) |
 | `.claude/skills/tosca-automation/references/blocks.md` | Reusable blocks deep dive (block↔case wiring, parameterLayerId, ULID rules, extend workflow) |

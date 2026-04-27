@@ -1,9 +1,17 @@
-# GitHub Copilot Instructions — TOSCA Cloud CLI
+# GitHub Copilot Instructions — TOSCA Cloud + Commander CLIs
 
 ## Project overview
 
-Single-file Python CLI (`tosca_cli.py`) for Tricentis TOSCA Cloud REST APIs.
-`ToscaClient` class handles all HTTP. Typer sub-apps expose commands per API surface.
+Two sibling Python CLIs in one repo:
+
+- **`tosca_cli.py`** — Tricentis **TOSCA Cloud** (multi-tenant SaaS). `ToscaClient` class, OAuth2 client_credentials, MBT / Inventory / Playlists / Identity / Simulations.
+- **`tosca_commander_cli.py`** — Tricentis **TOSCA Commander** (on-prem REST Webservice, `/rest/toscacommander`). `ToscaCommanderClient` class, pluggable auth (Basic / PAT / OAuth2 / Negotiate / NTLM), workspace + object CRUD + TQL + tasks + files + approvals.
+
+Both files are top-level modules, no hidden packages. Typer sub-apps expose commands per surface. They share `.env` (different prefixes: `TOSCA_*` vs `TOSCA_COMMANDER_*`) and Rich/JSON output conventions, but no class hierarchy.
+
+When the user describes an on-prem workspace (`Tricentis.Tosca.RestApiService`, `localhost:1111`, `WorkspaceBasePath`, TCAPI, multi-user workspace, AD auth), prefer `tosca_commander_cli.py`. When they mention `*.my.tricentis.com`, MBT, Inventory entityIds, Okta, or playlists, use `tosca_cli.py`. The two are not interchangeable — IDs and bodies don't transfer.
+
+For the on-prem skill reference (TQL syntax, approval workflow, KB0021775 screenshot pattern), see `.claude/skills/tosca-commander-automation/SKILL.md`.
 
 ## Agents + skills layout (shared with Claude Code)
 

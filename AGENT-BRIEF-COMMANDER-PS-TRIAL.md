@@ -34,7 +34,7 @@ You must **not** assume Python is installed; this entire trial runs in PowerShel
 
 You will need to gather four things from the user (or their Tosca Commander UI):
 
-1. **Tosca Server base URL** — e.g. `http://md1-tosc-d2.csg-it.net:80`. The CLI auto-appends `/rest/toscacommander` if missing.
+1. **Tosca Server base URL** — the host (and optional port) of the on-prem Tosca Server, e.g. `http://your-tosca-server:1111` or `https://tosca-server.example.com`. Ask the user; do not guess. The CLI auto-appends `/rest/toscacommander` if missing.
 2. **Workspace name** — the **exact case-sensitive folder name** that lives under the server's `WorkspaceBasePath` (configured in `appsettings.json`). The Tosca Commander UI title bar shows it. Common mistake: case differs from what the user remembers.
 3. **Auth credentials** — pick ONE combo:
    - **LDAP / AD (most common)** — `TOSCA_COMMANDER_AUTH=basic`, `TOSCA_COMMANDER_USER=user@DOMAIN.FQDN` (UPN format, exactly as shown in the Tosca Login dialog), `TOSCA_COMMANDER_PASSWORD=<the AD password>`. The Tosca login dialog labels this "LDAP" but on the wire it's HTTP Basic.

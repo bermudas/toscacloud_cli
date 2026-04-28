@@ -252,11 +252,14 @@ function Find-ModuleRefs {
 }
 
 function Get-Subparts {
-    # On Tosca 25.x, TestSteps don't come inline at ?depth=N -- they live behind
-    # an association. This probes the two known endpoints in fallback order and
-    # returns whichever yields a non-empty list. Returns @() if neither works.
+    # Walks the canonical association hierarchy per devcorner 2023.2 docs:
+    #   GET /<ws>/object/<id>/association/Items   <-- TestCase / Folder children
+    # The 'Items' name is documented (e.g. /object/344/association/Items returns
+    # a folder's sub-items). Older or version-specific builds also expose
+    # 'Subparts' or /treeview/<id>/subparts; we probe those as fallbacks.
     param([hashtable]$Auth, [string]$Base, [string]$Workspace, [string]$ObjectId)
     foreach ($path in @(
+        "$Base/$Workspace/object/$ObjectId/association/Items",
         "$Base/$Workspace/object/$ObjectId/association/Subparts",
         "$Base/$Workspace/treeview/$ObjectId/subparts"
     )) {
@@ -271,6 +274,20 @@ function Get-Subparts {
         } catch { continue }
     }
     return @()
+}
+
+function Get-StepModule {
+    # Per devcorner 2023.2 docs, the canonical way to get a TestStep's
+    # referenced Module is the typed association endpoint:
+    #   GET /<ws>/object/<stepId>/association/Module
+    # Returns the Module object directly, or null if the step doesn't reference
+    # one. Cleaner than scraping the TestStep's flat Attributes[] array.
+    param([hashtable]$Auth, [string]$Base, [string]$Workspace, [string]$StepId)
+    try {
+        $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$StepId/association/Module"
+        if ($r) { return $r }
+    } catch { }
+    return $null
 }
 
 function Test-IsModuleRefAttribute {
@@ -434,21 +451,37 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
             continue
         }
 
-        # Tosca 25.x: TestSteps live behind /object/<id>/association/Subparts (or treeview/<id>/subparts).
-        # Walk the Subparts and look in EACH step's Attributes for a module-ref attribute.
-        $modRefs = @()
+        # Canonical (per devcorner 2023.2 docs):
+        #   1. /<ws>/object/<tcId>/association/Items  -> TestSteps under the TestCase
+        #   2. For each step: /<ws>/object/<stepId>/association/Module
+        #      -> the linked Module (server returns it directly).
+        # Fallbacks (older/different shapes): Subparts walk + Attribute scrape.
+        $modRefs   = @()
+        $modFull   = $null
         $subparts = Get-Subparts $auth $baseUrl $ws $tcId
         foreach ($step in $subparts) {
             if ($null -eq $step) { continue }
             $stepId = if ($step.UniqueId) { $step.UniqueId } else { $step.Id }
             if (-not $stepId) { continue }
+
+            # Primary path: ask the server for the step's Module association.
+            $modAssoc = Get-StepModule $auth $baseUrl $ws $stepId
+            if ($modAssoc) {
+                $candidate = if ($modAssoc.UniqueId) { $modAssoc.UniqueId } else { $modAssoc.Id }
+                if ($candidate) {
+                    $modRefs += $candidate
+                    $modFull  = $modAssoc
+                    break
+                }
+            }
+
+            # Fallback: scrape the step's Attributes[] for a module-ref pair.
             try {
                 $stepFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${stepId}?depth=0"
             } catch { continue }
             if ($stepFull.Attributes) {
                 $modRefs += Find-ModuleRefsInAttributes $stepFull.Attributes
             }
-            # Older shape fallback: nested module-ref props inline on the step.
             $modRefs += Find-ModuleRefs $stepFull
             if ($modRefs.Count -gt 0) { break }
         }
@@ -460,9 +493,11 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         if (-not $modRefs -or $modRefs.Count -eq 0) { continue }
 
         $modId = $modRefs[0]
-        try {
-            $modFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${modId}?depth=0"
-        } catch { continue }
+        if (-not $modFull) {
+            try {
+                $modFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${modId}?depth=0"
+            } catch { continue }
+        }
 
         $tcParent  = Get-OwnerUniqueId $tcFull
         $modParent = Get-OwnerUniqueId $modFull

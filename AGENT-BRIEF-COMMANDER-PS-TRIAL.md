@@ -180,18 +180,50 @@ Created:
 
 ## 7. API reference for this workflow
 
-`trial.ps1` only touches the **TCRS** (Tosca Commander REST Webservice) under `/rest/toscacommander`. Eight endpoints, in execution order. Memorize the shapes — they're what you compare against when something fails.
+`trial.ps1` only touches the **TCRS** (Tosca Commander REST Webservice) under `/rest/toscacommander`. Endpoints below are aligned with **devcorner 2024.2** docs; a self-describing operations index lives at `<base>/help` on most builds. Memorize the shapes — they're what you compare against when something fails.
+
+### Auth headers (per devcorner 2024.2)
+
+| Mode | Headers |
+|---|---|
+| **Basic / LDAP / AD** | `Authorization: Basic <base64(user:pass)>` *(no AuthMode header)* |
+| **PAT** | `Authorization: <token>` *(token raw — no `Basic` prefix, no base64)* + `AuthMode: pat` |
+| **Client-credentials** | `Authorization: Basic <base64(client_id:client_secret)>` + `AuthMode: clientCredentials` *(plain Basic, NOT OAuth2)* |
+| **Negotiate** | Native NTLM/Kerberos challenge; `Invoke-RestMethod -UseDefaultCredentials` |
+| **NTLM (explicit creds)** | `Invoke-RestMethod -Credential` |
+
+If a tenant requires the LDAP-specific routing header (rare), set `TOSCA_COMMANDER_AUTH_MODE` env var and we'll forward it.
+
+### Endpoints used by `trial.ps1`, in execution order
 
 | # | Method | Path | Purpose | Request body | Expected 2xx response |
 |---|---|---|---|---|---|
-| 1 | `GET` | `<base>` (no trailing path) | Version probe — also a cheap auth/connectivity check. May or may not require auth depending on Tosca build. | none | `{ "Version": "<x.y.z>" }` |
-| 2 | `GET` | `<base>/<workspace>` | Open the workspace via TCAPI shim. Returns top-level workspace info. 404 = workspace folder missing under server's `WorkspaceBasePath`. | none | object with workspace metadata; shape varies by version |
-| 3 | `GET` | `<base>/<workspace>/object/project/` | Project root — the TCAPI root object. Its `UniqueId` is what scopes the TQL searches in step 4. | none | object containing at least `UniqueId` (or `Id`); other fields version-specific |
-| 4 | `POST` | `<base>/<workspace>/object/<rootId>/task/search?tqlString=<urlencoded TQL>` | TQL search rooted at the given object. Used in discovery. | `{}` (empty JSON; `tqlString` is on the query string) | array of objects, each with `UniqueId`, `Name`, and selected properties |
-| 5 | `GET` | `<base>/<workspace>/object/<id>?depth=<N>` | Fetch a single object plus children up to depth N. Used to capture source bodies. | none | object with `UniqueId`, `Name`, type-specific properties, plus nested `Subparts`/refs at deeper levels |
-| 6 | `POST` | `<base>/<workspace>/object/<parentId>` | Create a new object under `<parentId>`. **The body is a TCAPI object representation**, NOT a `{TypeName,Name,Properties}` wrapper. | the post-transformation body (server-minted fields stripped, `Name` renamed, refs rewritten) | object representation of the newly created node, including its **new** `UniqueId` |
-| 7 | `POST` | `<base>/<workspace>/task/CheckInAll` | Workspace-level generic task — commits all pending TCAPI changes from this session. Without it, your creates are visible only inside this TCAPI instance and disappear when the cache (default 60 s) expires. | `{}` | usually empty body / 204 |
-| 8 | `DELETE` | `<base>/<workspace>/object/<id>` | Cleanup. Only run if the user asks — the trial leaves both new objects intact by default. | none | empty body / 204 |
+| 1 | `GET` | `<base>` | Version probe; also a cheap auth/connectivity check. | none | `{ "Version": "<x.y.z>" }` |
+| 2 | `GET` | `<base>/<workspace>` | Open the workspace via TCAPI shim. 404 = workspace folder missing under `WorkspaceBasePath`. | none | object with workspace metadata; shape varies by version |
+| 3 | `GET` | `<base>/<workspace>/search?tql=<urlencoded TQL>` | **Canonical TQL search** (top-level, workspace-scoped, no rootId). Parameter is `tql`, not `tqlString`. | none | array of matching objects |
+| 4 | `GET` | `<base>/<workspace>/object/<id>?depth=<N>` | Fetch a single object plus children up to depth N. | none | object with `UniqueId`, `Name`, properties, nested `Subparts`/refs |
+| 5 | `POST` | `<base>/<workspace>/object/<parentId>` | Create a new object under `<parentId>`. Body = TCAPI object representation (server-minted fields stripped, `Name` renamed, refs rewritten). On strict newer builds the canonical form may be `POST <base>/<workspace>/object` with parent in body — probe if 405/404. | TCAPI object body | newly-created node JSON, includes **new** `UniqueId` |
+| 6 | `POST` | `<base>/<workspace>/task/CheckInAll` | Workspace-level generic task — commits all pending TCAPI changes. Optional query param `?checkincomment=<text>` for an audit comment. | `{}` | usually 204 |
+| 7 | `DELETE` | `<base>/<workspace>/object/<id>` | Cleanup. Only run if the user asks. | none | empty body / 204 |
+
+### Other canonical TCRS endpoints worth knowing
+
+| Path | Purpose |
+|---|---|
+| `<base>/GetWorkspaces` (GET) | List every workspace under `WorkspaceBasePath`. Names come back **prefixed with `\`** — strip it before reuse. Sanity-check the workspace name spelling here when step 2 returns 404. |
+| `<base>/<ws>/metainfo` (GET) | List all object types in this workspace. (Note: path is **`metainfo`**, not `meta`.) |
+| `<base>/<ws>/metainfo/<TypeName>` (GET) | Type summary — fields + supported tasks. |
+| `<base>/<ws>/metainfo/<TypeName>/attributes` (GET) | Full attribute schema for the type. Useful for deciding what to keep / strip on create. |
+| `<base>/<ws>/metainfo/<TypeName>/associations` (GET) | Full association schema. |
+| `<base>/<ws>/treeview` (GET) | Workspace tree root. |
+| `<base>/<ws>/treeview/<id>/subparts` (GET) | Direct children of an object. Different from `?depth=` on the object endpoint. |
+| `<base>/<ws>/object/<id>/task/ExportAutomationObjects` (GET) | TSU export — Tosca's portable bundle for cross-workspace migration. Returns binary; save to disk. |
+| `<base>/<ws>/task/importaoresults` (POST) | TSU import counterpart. |
+| `<base>/<ws>/object/<id>/task` (GET) | List tasks supported by this object. |
+| `<base>/<ws>/object/<execListId>/testcaselogswithtestcases` (GET) | Paired ExecutionLog ↔ TestCase retrieval — replaces a TQL walk for log inspection. |
+| `<base>/<ws>/projectid` (GET) | Workspace's project ID. |
+| `<base>/<ws>/revision` (GET) | Workspace revision info. |
+| `<base>/<ws>/getissues` (POST) | Workspace validation issues. |
 
 ### Field-name reality check
 
@@ -205,14 +237,22 @@ The script makes three assumptions about response shapes that may differ on real
 
 ## 8. Probing the API directly (when the script fails)
 
-When `trial.ps1` reports an unexpected response, **do not iterate the script blindly** — call the relevant endpoint by hand first and inspect the actual JSON. Save your auth header into `$h` once:
+When `trial.ps1` reports an unexpected response, **do not iterate the script blindly** — call the relevant endpoint by hand first and inspect the actual JSON. Save your auth headers into `$h` once (per devcorner 2024.2 patterns):
 
 ```powershell
-# PAT
-$h = @{Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(":$env:TOSCA_COMMANDER_TOKEN"))}
+# Basic / LDAP / AD
+$h = @{Authorization = "Basic " + [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes("$env:TOSCA_COMMANDER_USER`:$env:TOSCA_COMMANDER_PASSWORD"))}
 
-# OR Basic / LDAP / AD
-$h = @{Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$env:TOSCA_COMMANDER_USER`:$env:TOSCA_COMMANDER_PASSWORD"))}
+# OR — PAT (token raw, AuthMode header)
+$h = @{Authorization = $env:TOSCA_COMMANDER_TOKEN; AuthMode = 'pat'}
+
+# OR — Client credentials (Basic with cid:csecret, AuthMode header)
+$h = @{
+  Authorization = "Basic " + [Convert]::ToBase64String(
+      [Text.Encoding]::UTF8.GetBytes("$env:TOSCA_COMMANDER_CLIENT_ID`:$env:TOSCA_COMMANDER_CLIENT_SECRET"))
+  AuthMode = 'clientCredentials'
+}
 
 $base = "<base>/rest/toscacommander"
 $ws   = "<workspace>"
@@ -224,17 +264,16 @@ Then probe each step in isolation:
 # 1) Version probe
 Invoke-RestMethod -Uri "$base"                           -Headers $h | ConvertTo-Json -Depth 3
 
-# 2) Open workspace (must be 200; 404 = wrong name; 401 = bad creds)
+# 2) List workspaces (sanity-check the workspace name spelling)
+Invoke-RestMethod -Uri "$base/GetWorkspaces"             -Headers $h
+# names come back prefixed with '\' — strip before reuse
+
+# 3) Open workspace (must be 200; 404 = wrong name; 401 = bad creds)
 Invoke-RestMethod -Uri "$base/$ws"                       -Headers $h | ConvertTo-Json -Depth 3
 
-# 3) Project root + capture its UniqueId
-$root = Invoke-RestMethod -Uri "$base/$ws/object/project/" -Headers $h
-$root | Format-List *                                                   # see ALL top-level keys
-$rootId = $root.UniqueId; if (-not $rootId) { $rootId = $root.Id }      # find the right field
-
-# 4) TQL search (encode the TQL: => is %3D%3E, : is %3A, [ is %5B, ] is %5D, " is %22)
+# 4) Canonical TQL search (top-level, GET, parameter is `tql`)
 $tql = [uri]::EscapeDataString('=>SUBPARTS:TestCase')
-Invoke-RestMethod -Method POST -Uri "$base/$ws/object/$rootId/task/search?tqlString=$tql" -Headers $h `
+Invoke-RestMethod -Uri "$base/$ws/search?tql=$tql"       -Headers $h `
   | Select-Object -First 3 | ConvertTo-Json -Depth 5
 
 # 5) Fetch one object — exhaustively inspect its top-level keys
@@ -243,10 +282,13 @@ $obj | Get-Member -MemberType NoteProperty | Select-Object Name           # all 
 $obj.PSObject.Properties.Name -match 'Module'                              # any key referencing Module
 $obj.PSObject.Properties.Name -match 'Owner|Parent'                        # parent-reference candidates
 
-# 6) Create probe — try a tiny no-op body to see what the server complains about
+# 6) Create probe — try a tiny body to see what the server complains about
+#    Pick any folder UniqueId you have from steps 4/5 above as <parentId>.
+#    (The project root is also a valid parent: GET $base/$ws/object/project/ → grab UniqueId.)
+$parentId = '<paste-any-folder-UniqueId-from-step-4-or-5>'
 $probeBody = @{ TypeName = 'TestCase'; Name = 'cli_probe_temporary' } | ConvertTo-Json
 try {
-  Invoke-RestMethod -Method POST -Uri "$base/$ws/object/$rootId" -Headers $h `
+  Invoke-RestMethod -Method POST -Uri "$base/$ws/object/$parentId" -Headers $h `
     -Body $probeBody -ContentType 'application/json'
 } catch {
   $_.Exception.Response.GetResponseStream() | % { (New-Object IO.StreamReader $_).ReadToEnd() }

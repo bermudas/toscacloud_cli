@@ -115,20 +115,26 @@ function Get-AuthHeaders {
 
     if ($mode -eq 'pat' -or ($mode -eq 'auto' -and $token)) {
         if (-not $token) { throw "TOSCA_COMMANDER_AUTH=pat requires TOSCA_COMMANDER_TOKEN." }
-        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(":$token"))
-        return @{ Mode = 'pat'; Headers = @{ Authorization = "Basic $b64" }; UseDefaultCredentials = $false }
+        # Per devcorner 2024.2 docs: PAT goes raw in Authorization (no Basic
+        # prefix, no base64) with explicit AuthMode header.
+        return @{
+            Mode    = 'pat'
+            Headers = @{ Authorization = $token; AuthMode = 'pat' }
+            UseDefaultCredentials = $false
+        }
     }
 
     if ($mode -eq 'client-creds' -or ($mode -eq 'auto' -and $cid)) {
         if (-not ($cid -and $csec)) { throw "client-creds requires TOSCA_COMMANDER_CLIENT_ID + _CLIENT_SECRET." }
-        # Token URL is rooted at the server, above /rest/toscacommander.
-        $base = Get-NormalizedBaseUrl $Env['TOSCA_COMMANDER_BASE_URL']
-        $tokenUrl = ($base -replace '/rest/toscacommander$', '') + '/tua/connect/token'
-        $body = "grant_type=client_credentials&client_id=$cid&client_secret=$csec"
-        Write-Host "  -> fetching OAuth2 token from $tokenUrl"
-        $resp = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $body `
-                                  -ContentType 'application/x-www-form-urlencoded'
-        return @{ Mode = 'client-creds'; Headers = @{ Authorization = "Bearer $($resp.access_token)" }; UseDefaultCredentials = $false }
+        # Per devcorner 2024.2 docs: client-creds is plain Basic auth with
+        # client_id:client_secret + an explicit AuthMode header. NOT the
+        # OAuth2 token-exchange flow at /tua/connect/token (that's AOS).
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${cid}:${csec}"))
+        return @{
+            Mode    = 'client-creds'
+            Headers = @{ Authorization = "Basic $b64"; AuthMode = 'clientCredentials' }
+            UseDefaultCredentials = $false
+        }
     }
 
     if (-not ($user -and $pass)) {
@@ -292,7 +298,8 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
 
     Write-Host ""
     Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 20 to find 5 with Module refs)" -ForegroundColor Yellow
-    $tcs = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$rootId/task/search?tqlString=%3D%3ESUBPARTS%3ATestCase"
+    # Canonical TQL endpoint per devcorner 2024.2: /<ws>/search?tql=...
+    $tcs = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/search?tql=%3D%3ESUBPARTS%3ATestCase"
 
     $candidates = New-Object System.Collections.ArrayList
     foreach ($tc in @($tcs | Select-Object -First 20)) {
@@ -400,8 +407,8 @@ Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/task/CheckInAll" | Out-Null
 # Step D: verify
 Write-Host ""
 Write-Host "[8] Verify both via TQL" -ForegroundColor Yellow
-$verifyTc  = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$rootId/task/search?tqlString=%3D%3ESUBPARTS%3ATestCase%5BName%3D%22$([uri]::EscapeDataString($tcBody.Name))%22%5D"
-$verifyMod = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$rootId/task/search?tqlString=%3D%3ESUBPARTS%3AModule%5BName%3D%22$([uri]::EscapeDataString($modBody.Name))%22%5D"
+$verifyTc  = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/search?tql=%3D%3ESUBPARTS%3ATestCase%5BName%3D%22$([uri]::EscapeDataString($tcBody.Name))%22%5D"
+$verifyMod = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/search?tql=%3D%3ESUBPARTS%3AModule%5BName%3D%22$([uri]::EscapeDataString($modBody.Name))%22%5D"
 "  TC clone hits     : $($verifyTc.Count)"
 "  Module clone hits : $($verifyMod.Count)"
 

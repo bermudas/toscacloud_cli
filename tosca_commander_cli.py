@@ -73,7 +73,7 @@ config_app     = typer.Typer(help="Connection configuration",                  n
 workspace_app  = typer.Typer(help="Workspace lifecycle (open, info, project)", no_args_is_help=True)
 objects_app    = typer.Typer(help="Object CRUD (get/create/update/delete)",    no_args_is_help=True)
 meta_app       = typer.Typer(help="Discover object types and their tasks",     no_args_is_help=True)
-search_app     = typer.Typer(help="TQL search via /object/<id>/task/search",   no_args_is_help=True)
+search_app     = typer.Typer(help="TQL search via /<ws>/search?tql=...",        no_args_is_help=True)
 task_app       = typer.Typer(help="Execute tasks on objects or workspace",     no_args_is_help=True)
 files_app      = typer.Typer(help="Attached files (list/download)",            no_args_is_help=True)
 approvals_app  = typer.Typer(help="Pre-execution approval workflow",           no_args_is_help=True)
@@ -180,15 +180,24 @@ def _select_auth() -> tuple[httpx.Auth, str]:
     if mode == "pat" or (mode == "auto" and token):
         if not token:
             _exit_err("PAT auth requires TOSCA_COMMANDER_TOKEN.")
-        # Tosca PAT: pass token as basic-auth password with empty username.
-        return httpx.BasicAuth("", token), "pat"
+        # Per devcorner 2024.2 docs: PAT goes raw in Authorization (no Basic
+        # prefix, no base64 wrapping), with an explicit AuthMode header.
+        return _StaticHeaderAuth({"Authorization": token, "AuthMode": "pat"}), "pat"
 
     if mode == "client-creds" or (mode == "auto" and cid):
         if not cid or not csecret:
             _exit_err(
                 "Client-credentials auth requires TOSCA_COMMANDER_CLIENT_ID and TOSCA_COMMANDER_CLIENT_SECRET."
             )
-        return _ClientCredentialsAuth(cid, csecret), "client-creds"
+        # Per devcorner 2024.2 docs: client-creds is plain Basic auth with the
+        # client_id as username and client_secret as password, plus an explicit
+        # AuthMode header. NOT an OAuth2 token exchange (that's AOS, not TCRS).
+        import base64
+        cred = base64.b64encode(f"{cid}:{csecret}".encode()).decode("ascii")
+        return _StaticHeaderAuth({
+            "Authorization": f"Basic {cred}",
+            "AuthMode":      "clientCredentials",
+        }), "client-creds"
 
     # Default → Basic (also covers AD-backed multi-user workspaces)
     if not user or not password:
@@ -232,47 +241,19 @@ class _RequestsAuthAdapter(httpx.Auth):
         yield request
 
 
-class _ClientCredentialsAuth(httpx.Auth):
-    """OAuth2 client_credentials against Tosca Server's `/tua/connect/token`.
+class _StaticHeaderAuth(httpx.Auth):
+    """Sets a fixed dict of headers on every request.
 
-    The token endpoint sits at `<server-root>/tua/connect/token`, which is the
-    HTTPS gateway root **above** `/rest/toscacommander`. We derive it from the
-    request URL on first use and cache the bearer token until ~30 s before
-    expiry.
+    Used for the canonical TCRS auth patterns documented in devcorner 2024.2:
+      PAT             →  Authorization: <token>           + AuthMode: pat
+      client-creds    →  Authorization: Basic <b64>       + AuthMode: clientCredentials
     """
-    requires_response_body = True
-
-    def __init__(self, client_id: str, client_secret: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self._token: str | None = None
-        self._exp: float = 0.0
+    def __init__(self, headers: dict[str, str]):
+        self._headers = dict(headers)
 
     def auth_flow(self, request: httpx.Request):
-        if not self._token or time.time() > self._exp - 30:
-            base = str(request.url).split("/rest/")[0]
-            token_url = f"{base}/tua/connect/token"
-            body = (
-                f"grant_type=client_credentials&client_id={self.client_id}"
-                f"&client_secret={self.client_secret}"
-            ).encode()
-            tok_req = httpx.Request(
-                "POST", token_url,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                content=body,
-            )
-            tok_resp = yield tok_req
-            tok_resp.read()
-            if tok_resp.status_code != 200:
-                raise RuntimeError(
-                    f"OAuth2 token fetch failed: HTTP {tok_resp.status_code} {tok_resp.text[:300]}"
-                )
-            data = tok_resp.json()
-            self._token = data.get("access_token")
-            self._exp = time.time() + int(data.get("expires_in", 3600))
-            if not self._token:
-                raise RuntimeError(f"No access_token in token response: {data}")
-        request.headers["Authorization"] = f"Bearer {self._token}"
+        for k, v in self._headers.items():
+            request.headers[k] = v
         yield request
 
 
@@ -402,27 +383,82 @@ class ToscaCommanderClient:
             path += f"/{assoc_name}"
         return self.get(path)
 
-    # ----- Meta info -----
+    # ----- Meta info (canonical: /metainfo, not /meta) -----
     def meta_list(self, workspace: str) -> dict:
-        """GET <base>/<workspace>/meta — list known object types."""
-        return self.get(f"{workspace}/meta")
+        """GET <base>/<workspace>/metainfo — list known object types."""
+        return self.get(f"{workspace}/metainfo")
 
     def meta_for_type(self, workspace: str, type_name: str) -> dict:
-        """GET <base>/<workspace>/meta/<TypeName> — type metadata + supported tasks."""
-        return self.get(f"{workspace}/meta/{type_name}")
+        """GET <base>/<workspace>/metainfo/<TypeName> — type metadata + supported tasks."""
+        return self.get(f"{workspace}/metainfo/{type_name}")
 
-    # ----- TQL search -----
-    def tql_search(self, workspace: str, root_id: str, tql: str) -> dict:
-        """POST <base>/<workspace>/object/<rootId>/task/search?tqlString=...
+    def meta_attributes(self, workspace: str, type_name: str) -> dict:
+        """GET <base>/<workspace>/metainfo/<TypeName>/attributes — full attribute schema."""
+        return self.get(f"{workspace}/metainfo/{type_name}/attributes")
 
-        TQL queries can run against any object as the search root. Common roots:
-        the project root (use `workspace_project_root` to get it), or any folder.
-        POST is used so the (often-long) tqlString lands in the body, not the URL.
+    def meta_associations(self, workspace: str, type_name: str) -> dict:
+        """GET <base>/<workspace>/metainfo/<TypeName>/associations — full association schema."""
+        return self.get(f"{workspace}/metainfo/{type_name}/associations")
+
+    # ----- TQL search (canonical: top-level /search?tql=, GET) -----
+    def tql_search(self, workspace: str, tql: str, root_id: str | None = None) -> dict:
+        """GET <base>/<workspace>/search?tql=<urlencoded TQL>.
+
+        Per devcorner 2024.2 docs the canonical TQL endpoint is workspace-scoped
+        (no rootId in URL, parameter is `tql`, not `tqlString`). The legacy
+        `/object/<rootId>/task/search?tqlString=...` form is left available via
+        the `root_id` parameter for older Tosca builds — pass it only if the
+        canonical /search returns 404.
         """
-        # The Tosca REST surface accepts tqlString as a query parameter even on POST.
-        # Falls back to GET if the install rejects the body.
-        return self.post(f"{workspace}/object/{root_id}/task/search",
-                         params={"tqlString": tql})
+        if root_id:
+            return self.post(f"{workspace}/object/{root_id}/task/search",
+                             params={"tqlString": tql})
+        return self.get(f"{workspace}/search", params={"tql": tql})
+
+    # ----- Workspace listing (top-level GetWorkspaces) -----
+    def list_workspaces(self) -> list:
+        """GET <base>/GetWorkspaces — return every workspace under WorkspaceBasePath.
+
+        Workspace names come back prefixed with a leading backslash
+        (e.g. ``\\MyWorkspace``); strip it before using elsewhere.
+        """
+        out = self.get("GetWorkspaces")
+        if isinstance(out, list):
+            return [w.lstrip("\\") if isinstance(w, str) else w for w in out]
+        return out
+
+    # ----- TSU export (cross-workspace migration primitive) -----
+    def export_tsu(self, workspace: str, object_id: str,
+                   save_to: Path | None = None) -> dict | bytes:
+        """GET <base>/<workspace>/object/<id>/task/ExportAutomationObjects → TSU bundle.
+
+        TSU is Tosca's portable bundle format — a TestCase-and-its-dependencies
+        archive that imports cleanly into another workspace via the same
+        mechanism Tricentis uses for environment migration. Returns the raw
+        bytes of the bundle (write them to disk; do not parse).
+        """
+        url = self._url(f"{workspace}/object/{object_id}/task/ExportAutomationObjects")
+        with self._client() as c:
+            resp = c.get(url)
+            if resp.status_code >= 400:
+                raise ToscaCommanderError(resp.status_code, resp.text[:600])
+            if save_to is not None:
+                save_to.write_bytes(resp.content)
+                return {"saved": str(save_to), "bytes": len(resp.content)}
+            return resp.content
+
+    # ----- Treeview (canonical hierarchical navigation) -----
+    def treeview_root(self, workspace: str) -> dict:
+        """GET <base>/<workspace>/treeview — workspace root tree node."""
+        return self.get(f"{workspace}/treeview")
+
+    def treeview_object(self, workspace: str, object_id: str) -> dict:
+        """GET <base>/<workspace>/treeview/<id>."""
+        return self.get(f"{workspace}/treeview/{object_id}")
+
+    def treeview_subparts(self, workspace: str, object_id: str) -> dict:
+        """GET <base>/<workspace>/treeview/<id>/subparts — direct children only."""
+        return self.get(f"{workspace}/treeview/{object_id}/subparts")
 
     # ----- Task execution -----
     def task_object(self, workspace: str, object_id: str, task_name: str,
@@ -847,6 +883,28 @@ def objects_associations(
     _output_json(_safe_call(f"associations {object_id}", client.object_associations, ws, object_id, assoc_name=name))
 
 
+@objects_app.command("export-tsu")
+def objects_export_tsu(
+    object_id: str = typer.Argument(..., help="UniqueId of the object to export (TestCase, Module, folder, …)."),
+    output: Path = typer.Option(..., "--output", "-o",
+                                help="Path to save the .tsu bundle file."),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w",
+                                            envvar="TOSCA_COMMANDER_WORKSPACE"),
+):
+    """Export an object + its dependencies as a TSU bundle (Tosca's portable format).
+
+    GET <ws>/object/<id>/task/ExportAutomationObjects → binary bundle. The TSU
+    is the right tool for cross-workspace migration: the destination workspace
+    re-imports the bundle and Tricentis handles dependency resolution and
+    reference rewriting automatically.
+    """
+    ws = _ws_or_die(workspace)
+    client = ToscaCommanderClient()
+    out = _safe_call(f"export-tsu {object_id}",
+                     client.export_tsu, ws, object_id, save_to=output)
+    _output_json(out)
+
+
 # ---------------------------------------------------------------------------
 # `meta` subcommands
 # ---------------------------------------------------------------------------
@@ -867,11 +925,33 @@ def meta_type_cmd(
     type_name: str = typer.Argument(..., help="TCAPI type name (e.g. TestCase, Module, ExecutionList)."),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w",
                                             envvar="TOSCA_COMMANDER_WORKSPACE"),
+    attributes: bool = typer.Option(False, "--attributes",
+                                    help="Show the type's attribute schema instead of the summary."),
+    associations: bool = typer.Option(False, "--associations",
+                                      help="Show the type's association schema instead of the summary."),
 ):
     """Inspect a single object type — fields, associations, and exposed tasks."""
+    if attributes and associations:
+        _exit_err("Pick one: --attributes OR --associations (not both).")
     ws = _ws_or_die(workspace)
     client = ToscaCommanderClient()
-    _output_json(_safe_call(f"meta {type_name}", client.meta_for_type, ws, type_name))
+    if attributes:
+        _output_json(_safe_call(f"metainfo {type_name}/attributes",
+                                client.meta_attributes, ws, type_name))
+    elif associations:
+        _output_json(_safe_call(f"metainfo {type_name}/associations",
+                                client.meta_associations, ws, type_name))
+    else:
+        _output_json(_safe_call(f"metainfo {type_name}",
+                                client.meta_for_type, ws, type_name))
+
+
+@workspace_app.command("list")
+def workspace_list():
+    """List every workspace under the server's WorkspaceBasePath (no -w needed)."""
+    client = ToscaCommanderClient()
+    out = _safe_call("GetWorkspaces", client.list_workspaces)
+    _output_json(out)
 
 
 # ---------------------------------------------------------------------------
@@ -880,25 +960,23 @@ def meta_type_cmd(
 
 @search_app.command("tql")
 def search_tql(
-    tql: str = typer.Argument(..., help='TQL query, e.g. =>Subparts:TestCase[Status=="Planned"]'),
+    tql: str = typer.Argument(..., help='TQL query, e.g. =>SUBPARTS:TestCase[Status="Planned"]'),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w",
                                             envvar="TOSCA_COMMANDER_WORKSPACE"),
     root: Optional[str] = typer.Option(None, "--root", "-r",
-                                       help="UniqueId of the search root. Defaults to the project root."),
+                                       help="Legacy fallback: search via /object/<rootId>/task/search?tqlString=... "
+                                            "Use only if the canonical /<ws>/search?tql=... 404s on this Tosca version."),
 ):
-    """Run a TQL query starting from --root (default: project root)."""
+    """Run a TQL query against the workspace.
+
+    By default uses the canonical top-level endpoint `/<ws>/search?tql=...`
+    (per devcorner 2024.2 docs). Pass --root <UniqueId> to fall back to the
+    older `/object/<rootId>/task/search` form on installs that don't expose
+    the canonical search endpoint.
+    """
     ws = _ws_or_die(workspace)
     client = ToscaCommanderClient()
-    if not root:
-        proj = _safe_call("resolve project root", client.workspace_project_root, ws)
-        # The project-root response usually exposes its UniqueId as 'UniqueId' or similar.
-        root = proj.get("UniqueId") or proj.get("id") or proj.get("Id")
-        if not root:
-            _exit_err(
-                "Could not resolve project root UniqueId from response. "
-                "Pass --root explicitly with a folder/object id."
-            )
-    _output_json(_safe_call("tql search", client.tql_search, ws, root, tql))
+    _output_json(_safe_call("tql search", client.tql_search, ws, tql, root_id=root))
 
 
 # ---------------------------------------------------------------------------

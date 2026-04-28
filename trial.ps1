@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Tosca Commander REST API — round-trip trial (no Python required).
+    Tosca Commander REST API -- round-trip trial (no Python required).
 
 .DESCRIPTION
     Self-contained PowerShell script that proves the new Commander CLI's flow
@@ -9,7 +9,7 @@
     It exercises exactly the same TCRS endpoints as `tosca_commander_cli.py`:
 
       1. Read auth + base URL from .env (same format as the Python CLI uses).
-      2. Probe: GET <base>  → version JSON.
+      2. Probe: GET <base>  -> version JSON.
       3. Open workspace + find one TestCase that uses Modules + one Module.
       4. GET both bodies with depth.
       5. Strip server-minted fields, rename, rewrite the TestCase's module ref.
@@ -17,12 +17,12 @@
       7. CheckInAll.
       8. Verify both via TQL.
 
-    NOT a production CLI — it's a one-shot probe. The Python script
+    NOT a production CLI -- it's a one-shot probe. The Python script
     `tosca_commander_cli.py` is the maintained tool.
 
 .PARAMETER TestCaseId
     UniqueId of an existing TestCase that uses Module references. If omitted,
-    the script runs in DISCOVERY mode (steps 1–3 above) and prints candidate
+    the script runs in DISCOVERY mode (steps 1-3 above) and prints candidate
     IDs to feed back in on a second run.
 
 .PARAMETER ModuleId
@@ -46,11 +46,11 @@
     Path to the .env file. Default: ".env" in the current directory.
 
 .EXAMPLE
-    # Phase 1 — discovery (run with no IDs)
+    # Phase 1 -- discovery (run with no IDs)
     .\trial.ps1
 
 .EXAMPLE
-    # Phase 2 — round-trip (paste the IDs from phase 1)
+    # Phase 2 -- round-trip (paste the IDs from phase 1)
     .\trial.ps1 -TestCaseId 01ABC... -ModuleId 01XYZ... `
                 -TestCaseParentId 01PQR... -ModuleParentId 01STU...
 #>
@@ -125,7 +125,7 @@ function Get-AuthHeaders {
         $base = Get-NormalizedBaseUrl $Env['TOSCA_COMMANDER_BASE_URL']
         $tokenUrl = ($base -replace '/rest/toscacommander$', '') + '/tua/connect/token'
         $body = "grant_type=client_credentials&client_id=$cid&client_secret=$csec"
-        Write-Host "  → fetching OAuth2 token from $tokenUrl"
+        Write-Host "  -> fetching OAuth2 token from $tokenUrl"
         $resp = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $body `
                                   -ContentType 'application/x-www-form-urlencoded'
         return @{ Mode = 'client-creds'; Headers = @{ Authorization = "Bearer $($resp.access_token)" }; UseDefaultCredentials = $false }
@@ -246,7 +246,7 @@ function Edit-Refs {
 # 1. Bootstrap
 # ----------------------------------------------------------------------------
 
-Write-Host "Tosca Commander REST trial — PowerShell" -ForegroundColor Cyan
+Write-Host "Tosca Commander REST trial -- PowerShell" -ForegroundColor Cyan
 $envVars = Read-EnvFile $EnvFile
 $baseUrl = Get-NormalizedBaseUrl $envVars['TOSCA_COMMANDER_BASE_URL']
 $ws      = $envVars['TOSCA_COMMANDER_WORKSPACE']
@@ -259,7 +259,7 @@ Write-Host "  Auth mode: $($auth.Mode)"
 Write-Host ""
 
 # ----------------------------------------------------------------------------
-# 2. Probe — version + open workspace
+# 2. Probe -- version + open workspace
 # ----------------------------------------------------------------------------
 
 Write-Host "[1] GET $baseUrl  (version probe)" -ForegroundColor Yellow
@@ -275,19 +275,19 @@ Write-Host "[2] GET $baseUrl/$ws  (open workspace)" -ForegroundColor Yellow
 $wsInfo = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws"
 $wsInfo | ConvertTo-Json -Depth 5
 
-# Project root — needed by both discovery (TQL search root) and round-trip (verify step).
+# Project root -- needed by both discovery (TQL search root) and round-trip (verify step).
 $rootResp = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/project/"
 $rootId   = $rootResp.UniqueId
 if (-not $rootId) { $rootId = $rootResp.Id }
 if (-not $rootId) { throw "Could not resolve project-root UniqueId from response." }
 
 # ----------------------------------------------------------------------------
-# 3. Discovery mode — print candidate IDs and exit
+# 3. Discovery mode -- print candidate IDs and exit
 # ----------------------------------------------------------------------------
 
 if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $ModuleParentId) {
     Write-Host ""
-    Write-Host "DISCOVERY MODE — finding TestCases that reference Modules and resolving their parents..." -ForegroundColor Magenta
+    Write-Host "DISCOVERY MODE -- finding TestCases that reference Modules and resolving their parents..." -ForegroundColor Magenta
     Write-Host "  project root UniqueId = $rootId"
 
     Write-Host ""
@@ -303,7 +303,7 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         try {
             $tcFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${tcId}?depth=5"
         } catch {
-            Write-Host "  skip $($tc.Name) — GET failed" -ForegroundColor DarkGray
+            Write-Host "  skip $($tc.Name) -- GET failed" -ForegroundColor DarkGray
             continue
         }
 
@@ -318,7 +318,7 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         $tcParent  = Get-OwnerUniqueId $tcFull
         $modParent = Get-OwnerUniqueId $modFull
         if (-not $tcParent -or -not $modParent) {
-            Write-Host "  skip $($tc.Name) — could not resolve parent UniqueId" -ForegroundColor DarkGray
+            Write-Host "  skip $($tc.Name) -- could not resolve parent UniqueId" -ForegroundColor DarkGray
             continue
         }
 
@@ -331,7 +331,7 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
             'MOD_Id'      = $modId
             'MOD_Parent'  = $modParent
         })
-        Write-Host "  found candidate $($candidates.Count): $($tcFull.Name) → $($modFull.Name)" -ForegroundColor DarkGreen
+        Write-Host "  found candidate $($candidates.Count): $($tcFull.Name) -> $($modFull.Name)" -ForegroundColor DarkGreen
     }
 
     if ($candidates.Count -eq 0) {
@@ -350,7 +350,7 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
     foreach ($c in $candidates) {
         $cmd = ".\trial.ps1 -TestCaseId {0} -ModuleId {1} -TestCaseParentId {2} -ModuleParentId {3}" -f `
                $c.TC_Id, $c.MOD_Id, $c.TC_Parent, $c.MOD_Parent
-        Write-Host "  # row $($c.'#'): $($c.TestCase) → $($c.Module)" -ForegroundColor DarkGray
+        Write-Host "  # row $($c.'#'): $($c.TestCase) -> $($c.Module)" -ForegroundColor DarkGray
         Write-Host "  $cmd" -ForegroundColor Yellow
     }
     return
@@ -378,24 +378,24 @@ $modBody.Name = "$($modBody.Name)$ModuleSuffix"
 $newMod = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$ModuleParentId" $modBody
 $newModId = $newMod.UniqueId
 if (-not $newModId) { $newModId = $newMod.Id }
-"  → new Module UniqueId = $newModId"
+"  -> new Module UniqueId = $newModId"
 
 # Step B: recreate the TestCase with the module ref rewritten
 Write-Host ""
-Write-Host "[6] POST new TestCase under $TestCaseParentId (strip + rename '$Suffix' + rewrite $ModuleId → $newModId)" -ForegroundColor Yellow
+Write-Host "[6] POST new TestCase under $TestCaseParentId (strip + rename '$Suffix' + rewrite $ModuleId -> $newModId)" -ForegroundColor Yellow
 $tcBody = Remove-ServerFields $tcSrc
 $tcBody = Edit-Refs $tcBody @{ $ModuleId = $newModId }
 $tcBody.Name = "$($tcBody.Name)$Suffix"
 $newTc = Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/object/$TestCaseParentId" $tcBody
 $newTcId = $newTc.UniqueId
 if (-not $newTcId) { $newTcId = $newTc.Id }
-"  → new TestCase UniqueId = $newTcId"
+"  -> new TestCase UniqueId = $newTcId"
 
 # Step C: persist
 Write-Host ""
 Write-Host "[7] CheckInAll" -ForegroundColor Yellow
 Invoke-Tcrs $auth 'POST' "$baseUrl/$ws/task/CheckInAll" | Out-Null
-"  ✓ CheckInAll OK"
+"  [OK] CheckInAll OK"
 
 # Step D: verify
 Write-Host ""
@@ -409,7 +409,7 @@ Write-Host ""
 Write-Host "DONE." -ForegroundColor Green
 Write-Host "Created:"
 Write-Host "  Module    : $($modBody.Name)   UniqueId=$newModId"
-Write-Host "  TestCase  : $($tcBody.Name)    UniqueId=$newTcId  → references $newModId (was $ModuleId)"
+Write-Host "  TestCase  : $($tcBody.Name)    UniqueId=$newTcId  -> references $newModId (was $ModuleId)"
 Write-Host ""
 Write-Host "Cleanup (when you're done):"
 Write-Host "  Invoke-RestMethod -Method DELETE -Uri '$baseUrl/$ws/object/$newTcId'  -Headers @{Authorization='...'}"

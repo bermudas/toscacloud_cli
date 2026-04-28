@@ -194,9 +194,20 @@ function Remove-ServerFields {
 }
 
 function Get-OwnerUniqueId {
-    # Probe common field names that hold the parent reference. Tosca versions
-    # have used different names over the years; try them in order of frequency.
-    param($Obj)
+    # Resolve the parent UniqueId for an object, probing in three fallback tiers:
+    #   1. Top-level property on the deserialized body (older Tosca builds).
+    #   2. Inside Attributes[] flat-metadata array (Tosca 25.x shape).
+    #   3. Via /object/<id>/association/Owner (the canonical Tosca 25.x path).
+    # Tier 3 requires the auth + URL bits, which are now optional positional args.
+    param(
+        $Obj,
+        [hashtable]$Auth = $null,
+        [string]$Base = $null,
+        [string]$Workspace = $null,
+        [string]$ObjectId = $null
+    )
+
+    # Tier 1: top-level property
     foreach ($key in 'OwnerUniqueId','ParentUniqueId','OwnerId','ParentId','Parent') {
         if ($Obj -and $Obj.PSObject.Properties[$key]) {
             $v = $Obj.PSObject.Properties[$key].Value
@@ -204,6 +215,31 @@ function Get-OwnerUniqueId {
             if ($v -and $v.UniqueId)      { return $v.UniqueId }
         }
     }
+
+    # Tier 2: Attributes[] entries (flat-metadata shape)
+    if ($Obj -and $Obj.Attributes) {
+        foreach ($key in 'OwnerUniqueId','ParentUniqueId','OwnerId','ParentId','Parent','OwnerObjectUniqueId') {
+            $attr = $Obj.Attributes | Where-Object { $_.Name -eq $key } | Select-Object -First 1
+            if ($attr -and $attr.Value -is [string] -and $attr.Value) { return $attr.Value }
+        }
+    }
+
+    # Tier 3: Owner association lookup (Tosca 25.x canonical)
+    if ($Auth -and $Base -and $Workspace -and $ObjectId) {
+        foreach ($name in @('Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder')) {
+            try {
+                $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$ObjectId/association/$name"
+                if ($r) {
+                    $first = if ($r -is [System.Collections.IList]) { @($r)[0] } else { $r }
+                    if ($first) {
+                        if ($first.UniqueId) { return $first.UniqueId }
+                        if ($first.Id)       { return $first.Id }
+                    }
+                }
+            } catch { continue }
+        }
+    }
+
     return $null
 }
 
@@ -512,10 +548,13 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
             } catch { continue }
         }
 
-        $tcParent  = Get-OwnerUniqueId $tcFull
-        $modParent = Get-OwnerUniqueId $modFull
+        # Pass auth + IDs so Get-OwnerUniqueId can fall through to /association/Owner
+        # when parent isn't inline on the body (Tosca 25.x case).
+        $tcParent  = Get-OwnerUniqueId $tcFull  $auth $baseUrl $ws $tcId
+        $modParent = Get-OwnerUniqueId $modFull $auth $baseUrl $ws $modId
         if (-not $tcParent -or -not $modParent) {
-            Write-Host "  skip $($tc.Name) -- could not resolve parent UniqueId" -ForegroundColor DarkGray
+            $missing = if (-not $tcParent) { 'TC parent' } else { 'Module parent' }
+            Write-Host "  skip $($tc.Name) -- could not resolve $missing UniqueId" -ForegroundColor DarkGray
             continue
         }
 

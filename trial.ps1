@@ -207,19 +207,41 @@ function Get-OwnerUniqueId {
     return $null
 }
 
+function Test-IsToscaUniqueId {
+    # Tosca UniqueIds appear in two formats across versions:
+    #   ULID -- 26-char Crockford base32  (e.g. 01KF3FGGNNCC98DADNTGARBQAB)
+    #   GUID -- 36-char hyphenated         (e.g. 3a16a7b4-94cc-b7aa-65c9-f9fb5bec6a6b)
+    param([string]$Value)
+    if (-not $Value) { return $false }
+    if ($Value -match '^[0-9A-HJKMNP-TV-Z]{26}$') { return $true }    # ULID
+    if ($Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return $true }  # GUID
+    return $false
+}
+
 function Find-ModuleRefs {
-    # Walks an arbitrary deserialized JSON tree looking for property values
-    # that (a) live under a key whose name contains 'Module' and (b) look
-    # like a Tosca UniqueId (26-char Crockford base32). Returns deduped strings.
+    # Walks an arbitrary deserialized JSON tree for property values that:
+    #   (a) live under a key whose name contains 'Module', and
+    #   (b) look like a Tosca UniqueId (ULID or hyphenated GUID -- see Test-IsToscaUniqueId).
+    # Also handles the struct-wrapped form { "ModuleReference": { "UniqueId": "..." } }.
+    # Returns deduped strings.
     param($Obj, [System.Collections.ArrayList]$Out = $null)
     if ($null -eq $Out) { $Out = New-Object System.Collections.ArrayList }
     if ($null -eq $Obj) { return $Out }
     if ($Obj -is [System.Management.Automation.PSCustomObject]) {
         foreach ($p in $Obj.PSObject.Properties) {
-            if ($p.Name -like '*Module*' -and $p.Value -is [string] `
-                -and $p.Value -match '^[0-9A-HJKMNP-TV-Z]{26}$' `
-                -and -not $Out.Contains($p.Value)) {
-                $null = $Out.Add($p.Value)
+            if ($p.Name -like '*Module*') {
+                # Direct string value (most common shape)
+                if ($p.Value -is [string] -and (Test-IsToscaUniqueId $p.Value) -and -not $Out.Contains($p.Value)) {
+                    $null = $Out.Add($p.Value)
+                }
+                # Struct-wrapped: { "ModuleReference": { "UniqueId": "..." } }
+                if ($p.Value -is [System.Management.Automation.PSCustomObject] `
+                    -and $p.Value.PSObject.Properties['UniqueId']) {
+                    $nested = $p.Value.PSObject.Properties['UniqueId'].Value
+                    if ($nested -is [string] -and (Test-IsToscaUniqueId $nested) -and -not $Out.Contains($nested)) {
+                        $null = $Out.Add($nested)
+                    }
+                }
             }
             Find-ModuleRefs $p.Value $Out | Out-Null
         }

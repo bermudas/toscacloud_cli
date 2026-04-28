@@ -251,6 +251,34 @@ function Find-ModuleRefs {
     return $Out
 }
 
+function Show-UniqueIdValues {
+    # Diagnostic helper -- recursively collects every (key-path, key-name, value)
+    # triple where the value looks like a Tosca UniqueId. Used when discovery
+    # comes up empty: dumps the property structure of an actual TestCase so the
+    # engineer can see what key names this Tosca version uses for module refs.
+    param($Obj, [string]$Path = '$', [System.Collections.ArrayList]$Out = $null)
+    if ($null -eq $Out) { $Out = New-Object System.Collections.ArrayList }
+    if ($null -eq $Obj) { return $Out }
+    if ($Obj -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($p in $Obj.PSObject.Properties) {
+            $childPath = "$Path.$($p.Name)"
+            if ($p.Value -is [string] -and (Test-IsToscaUniqueId $p.Value)) {
+                $null = $Out.Add([PSCustomObject]@{
+                    Path = $childPath; Key = $p.Name; Value = $p.Value
+                })
+            }
+            Show-UniqueIdValues $p.Value $childPath $Out | Out-Null
+        }
+    } elseif ($Obj -is [System.Collections.IList]) {
+        $i = 0
+        foreach ($it in $Obj) {
+            Show-UniqueIdValues $it "$Path[$i]" $Out | Out-Null
+            $i++
+        }
+    }
+    return $Out
+}
+
 function Edit-Refs {
     param($Obj, [hashtable]$Map)
     if ($null -eq $Obj) { return $null }
@@ -366,7 +394,48 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
     if ($candidates.Count -eq 0) {
         Write-Host ""
         Write-Host "No TestCases with Module references found in the first 20 results." -ForegroundColor Red
-        Write-Host "Try a workspace with active web/SAP/API automation, or pass IDs manually."
+        Write-Host "Capturing diagnostic from the first TestCase so the engineer can fix the heuristic..." -ForegroundColor Yellow
+
+        $firstTc = @($tcs | Select-Object -First 1)[0]
+        if ($firstTc) {
+            $firstId   = if ($firstTc.UniqueId) { $firstTc.UniqueId } else { $firstTc.Id }
+            $firstName = $firstTc.Name
+            Write-Host "  diagnostic source: $firstName ($firstId)" -ForegroundColor DarkGray
+
+            try {
+                $diagObj  = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${firstId}?depth=5"
+                $diagPath = "discovery-diagnostic.json"
+                $diagJson = $diagObj | ConvertTo-Json -Depth 30
+                $diagJson | Out-File -FilePath $diagPath -Encoding utf8
+                Write-Host "  full body saved -> $diagPath  ($([math]::Round($diagJson.Length / 1KB, 1)) KB)" -ForegroundColor Green
+
+                Write-Host ""
+                Write-Host "All UniqueId-shaped values inside this TestCase:" -ForegroundColor Yellow
+                $uids = Show-UniqueIdValues $diagObj
+                $uids | Format-Table Path, Key -AutoSize | Out-String | Write-Host
+
+                Write-Host "Distinct keys carrying a UniqueId-shaped value (sorted by frequency):" -ForegroundColor Yellow
+                Write-Host "  -> the module-reference key on this Tosca build is one of these," -ForegroundColor DarkGray
+                Write-Host "     even if its name does NOT contain the substring 'Module'." -ForegroundColor DarkGray
+                $uids | Group-Object Key | Sort-Object Count -Descending |
+                    Format-Table Count, Name -AutoSize | Out-String | Write-Host
+
+                Write-Host "Top-level property names on this TestCase:" -ForegroundColor Yellow
+                $diagObj.PSObject.Properties | Select-Object Name, MemberType |
+                    Format-Table -AutoSize | Out-String | Write-Host
+            } catch {
+                Write-Host "  diagnostic dump failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  TQL =>SUBPARTS:TestCase returned 0 results -- workspace may be empty." -ForegroundColor Red
+        }
+
+        Write-Host ""
+        Write-Host "Send the engineer:" -ForegroundColor Magenta
+        Write-Host "  1. The contents of  $diagPath  (full first-TestCase body, sanitize values if needed)"
+        Write-Host "  2. The 'Distinct keys' table above"
+        Write-Host "  3. The 'Top-level property names' table above"
+        Write-Host "He'll add the right key name to Find-ModuleRefs and re-ship." -ForegroundColor Magenta
         return
     }
 

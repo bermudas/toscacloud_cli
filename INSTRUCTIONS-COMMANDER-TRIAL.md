@@ -4,12 +4,7 @@ Goal: confirm the new on-prem CLI can read your workspace, then **round-trip an 
 
 You only need one file: `tosca_commander_cli.py`. Drop it anywhere, install 4 Python packages, set up `.env`, run the steps, paste outputs back.
 
-**No Python on the test box?** Use the bundled `trial.ps1` instead — self-contained PowerShell 5.1+, reads the same `.env`. Two-phase flow:
-
-1. `.\trial.ps1` (no parameters) — connects, lists 5 TestCases that reference Modules, resolves their parents, and **prints a ready-to-paste Phase 2 command for each row**.
-2. Pick one row's command, paste it, press Enter — the script does the full round-trip (strip → rename → rewrite-ref → POST × 2 → CheckInAll → verify) in one go.
-
-Skip step 2 of the setup below (no `pip install` needed). Outputs land in your console — paste them back the same way.
+**No Python on the test box?** Use the bundled `trial.ps1` instead — self-contained PowerShell 5.1+, reads the same `.env`. The PowerShell trial has its own dedicated brief: `AGENT-BRIEF-COMMANDER-PS-TRIAL.md` (in this same folder). It's written for an LLM agent driving the trial on the tester's machine — but a human tester can follow it just as well.
 
 ## What this trial does (and doesn't do)
 

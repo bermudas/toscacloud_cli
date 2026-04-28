@@ -424,22 +424,16 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
     Write-Host "  project root UniqueId = $rootId"
 
     Write-Host ""
-    Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 30 to find 5 with Module refs)" -ForegroundColor Yellow
+    Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 50 to find 5 with Module refs)" -ForegroundColor Yellow
     # Canonical TQL endpoint per devcorner 2024.2: /<ws>/search?tql=...
     $tcs = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/search?tql=%3D%3ESUBPARTS%3ATestCase"
 
-    # Filter out training/example folders that almost never have workspace-created
-    # Module refs (they use engine-bundled Standard modules).
+    # Folders to skip -- training / examples / Standard-module demos almost
+    # never have workspace-created Module refs (they use engine-bundled modules).
     $skipPatterns = @('*Standard module example*', '*ZZZ_*', '*Examples*', '*Tutorial*')
-    $tcs = $tcs | Where-Object {
-        $np = $_.NodePath
-        if (-not $np) { return $true }
-        foreach ($pat in $skipPatterns) { if ($np -like $pat) { return $false } }
-        return $true
-    }
 
     $candidates = New-Object System.Collections.ArrayList
-    foreach ($tc in @($tcs | Select-Object -First 30)) {
+    foreach ($tc in @($tcs | Select-Object -First 50)) {
         if ($candidates.Count -ge 5) { break }
         $tcId = if ($tc.UniqueId) { $tc.UniqueId } else { $tc.Id }
         if (-not $tcId) { continue }
@@ -449,6 +443,25 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         } catch {
             Write-Host "  skip $($tc.Name) -- GET failed" -ForegroundColor DarkGray
             continue
+        }
+
+        # Path-based filter -- check AFTER fetching the full body. On Tosca 25.x
+        # the search response is summary-only (no NodePath at top level); the
+        # full body has NodePath either at top level or inside Attributes[].
+        $np = $tcFull.NodePath
+        if (-not $np -and $tcFull.Attributes) {
+            $npAttr = $tcFull.Attributes | Where-Object { $_.Name -eq 'NodePath' } | Select-Object -First 1
+            if ($npAttr) { $np = $npAttr.Value }
+        }
+        if ($np) {
+            $skipThis = $false
+            foreach ($pat in $skipPatterns) {
+                if ($np -like $pat) { $skipThis = $true; break }
+            }
+            if ($skipThis) {
+                Write-Host "  skip $($tc.Name) -- folder matches skip pattern ($np)" -ForegroundColor DarkGray
+                continue
+            }
         }
 
         # Canonical (per devcorner 2023.2 docs):
@@ -520,10 +533,40 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
 
     if ($candidates.Count -eq 0) {
         Write-Host ""
-        Write-Host "No TestCases with Module references found in the first 30 results." -ForegroundColor Red
-        Write-Host "Capturing diagnostic from the first TestCase + its Subparts so the engineer can fix..." -ForegroundColor Yellow
+        Write-Host "No TestCases with Module references found in the first 50 results." -ForegroundColor Red
+        Write-Host "Capturing diagnostic from a NON-example TestCase + its Subparts so the engineer can fix..." -ForegroundColor Yellow
 
-        $firstTc = @($tcs | Select-Object -First 1)[0]
+        # Pick a TC whose NodePath (after fetching full body) does NOT match the
+        # skip patterns -- otherwise we keep dumping the same Standard-example TC.
+        $firstTc = $null
+        foreach ($candidate in @($tcs | Select-Object -First 50)) {
+            $cid = if ($candidate.UniqueId) { $candidate.UniqueId } else { $candidate.Id }
+            if (-not $cid) { continue }
+            try {
+                $cFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${cid}?depth=5"
+            } catch { continue }
+            $cnp = $cFull.NodePath
+            if (-not $cnp -and $cFull.Attributes) {
+                $cnpAttr = $cFull.Attributes | Where-Object { $_.Name -eq 'NodePath' } | Select-Object -First 1
+                if ($cnpAttr) { $cnp = $cnpAttr.Value }
+            }
+            $isSkipped = $false
+            if ($cnp) {
+                foreach ($pat in $skipPatterns) {
+                    if ($cnp -like $pat) { $isSkipped = $true; break }
+                }
+            }
+            if (-not $isSkipped) {
+                $firstTc = $candidate
+                Write-Host "  picked diagnostic TC: $($candidate.Name) ($cnp)" -ForegroundColor DarkGray
+                break
+            }
+        }
+        # Fallback: if every TC in first 50 is a skip-match, just take the first.
+        if (-not $firstTc) {
+            $firstTc = @($tcs | Select-Object -First 1)[0]
+            Write-Host "  no non-example TC found in first 50 -- falling back to first TC" -ForegroundColor DarkGray
+        }
         if ($firstTc) {
             $firstId   = if ($firstTc.UniqueId) { $firstTc.UniqueId } else { $firstTc.Id }
             $firstName = $firstTc.Name
@@ -551,7 +594,19 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
                     $subDump | ConvertTo-Json -Depth 30 | Out-File -FilePath $subPath -Encoding utf8
                     Write-Host "  $($subDump.Count) Subpart(s) saved -> $subPath" -ForegroundColor Green
                 } else {
-                    Write-Host "  Subparts walk returned 0 -- both /association/Subparts AND /treeview/<id>/subparts failed (or returned empty)." -ForegroundColor Red
+                    Write-Host "  Subparts walk returned 0 -- /association/Items, /association/Subparts, AND /treeview/<id>/subparts all failed or returned empty." -ForegroundColor Red
+                    Write-Host "  Probe /object/<id>/association manually to see the available association names on this Tosca version." -ForegroundColor Red
+                }
+
+                # Also probe the all-associations endpoint to surface what's actually exposed
+                Write-Host "  probing /object/$firstId/association for all available association names..." -ForegroundColor DarkGray
+                try {
+                    $allAssoc = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/$firstId/association"
+                    $assocPath = "discovery-diagnostic-associations.json"
+                    $allAssoc | ConvertTo-Json -Depth 30 | Out-File -FilePath $assocPath -Encoding utf8
+                    Write-Host "  associations saved -> $assocPath" -ForegroundColor Green
+                } catch {
+                    Write-Host "  /object/<id>/association also failed: $($_.Exception.Message)" -ForegroundColor Red
                 }
                 Write-Host "  full body saved -> $diagPath  ($([math]::Round($diagJson.Length / 1KB, 1)) KB)" -ForegroundColor Green
 

@@ -251,6 +251,66 @@ function Find-ModuleRefs {
     return $Out
 }
 
+function Get-Subparts {
+    # On Tosca 25.x, TestSteps don't come inline at ?depth=N -- they live behind
+    # an association. This probes the two known endpoints in fallback order and
+    # returns whichever yields a non-empty list. Returns @() if neither works.
+    param([hashtable]$Auth, [string]$Base, [string]$Workspace, [string]$ObjectId)
+    foreach ($path in @(
+        "$Base/$Workspace/object/$ObjectId/association/Subparts",
+        "$Base/$Workspace/treeview/$ObjectId/subparts"
+    )) {
+        try {
+            $r = Invoke-Tcrs $Auth 'GET' $path
+            if ($r) {
+                if ($r -is [System.Collections.IList]) { return @($r) }
+                if ($r.Count) { return @($r) }
+                # Single object -- still valid
+                return @($r)
+            }
+        } catch { continue }
+    }
+    return @()
+}
+
+function Test-IsModuleRefAttribute {
+    # On Tosca 25.x a TestStep's module reference is encoded as one entry in
+    # its Attributes[] array: { "Name": "<key>", "Value": "<UniqueId>" } where
+    # <key> contains 'Module' (e.g. 'OwnerModule', 'ModuleReference',
+    # 'XModuleReference') but NOT 'ModuleAttribute' (those reference
+    # *attributes within* a module, not the module itself).
+    param([string]$Name)
+    if (-not $Name) { return $false }
+    if ($Name -like '*Module*' -and $Name -notlike '*ModuleAttribute*' -and $Name -notlike '*Attribute*') {
+        return $true
+    }
+    return $false
+}
+
+function Find-ModuleRefsInAttributes {
+    # Walks an Attributes[]-shaped array (Tosca 25.x flat metadata) returning
+    # any { Name, Value } pair whose Value is a UniqueId AND whose Name names a
+    # module reference. Different from Find-ModuleRefs which assumed nested
+    # property objects.
+    param($AttributesArray)
+    $out = @()
+    if ($null -eq $AttributesArray) { return $out }
+    foreach ($attr in $AttributesArray) {
+        if ($null -eq $attr) { continue }
+        $attrName  = $attr.PSObject.Properties['Name']
+        $attrValue = $attr.PSObject.Properties['Value']
+        if (-not $attrName -or -not $attrValue) { continue }
+        $n = $attrName.Value
+        $v = $attrValue.Value
+        if (Test-IsModuleRefAttribute $n) {
+            if ($v -is [string] -and (Test-IsToscaUniqueId $v)) {
+                $out += $v
+            }
+        }
+    }
+    return $out
+}
+
 function Show-UniqueIdValues {
     # Diagnostic helper -- recursively collects every (key-path, key-name, value)
     # triple where the value looks like a Tosca UniqueId. Used when discovery
@@ -347,12 +407,22 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
     Write-Host "  project root UniqueId = $rootId"
 
     Write-Host ""
-    Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 20 to find 5 with Module refs)" -ForegroundColor Yellow
+    Write-Host "[3] TQL =>SUBPARTS:TestCase  (probing first 30 to find 5 with Module refs)" -ForegroundColor Yellow
     # Canonical TQL endpoint per devcorner 2024.2: /<ws>/search?tql=...
     $tcs = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/search?tql=%3D%3ESUBPARTS%3ATestCase"
 
+    # Filter out training/example folders that almost never have workspace-created
+    # Module refs (they use engine-bundled Standard modules).
+    $skipPatterns = @('*Standard module example*', '*ZZZ_*', '*Examples*', '*Tutorial*')
+    $tcs = $tcs | Where-Object {
+        $np = $_.NodePath
+        if (-not $np) { return $true }
+        foreach ($pat in $skipPatterns) { if ($np -like $pat) { return $false } }
+        return $true
+    }
+
     $candidates = New-Object System.Collections.ArrayList
-    foreach ($tc in @($tcs | Select-Object -First 20)) {
+    foreach ($tc in @($tcs | Select-Object -First 30)) {
         if ($candidates.Count -ge 5) { break }
         $tcId = if ($tc.UniqueId) { $tc.UniqueId } else { $tc.Id }
         if (-not $tcId) { continue }
@@ -364,7 +434,29 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
             continue
         }
 
-        $modRefs = Find-ModuleRefs $tcFull
+        # Tosca 25.x: TestSteps live behind /object/<id>/association/Subparts (or treeview/<id>/subparts).
+        # Walk the Subparts and look in EACH step's Attributes for a module-ref attribute.
+        $modRefs = @()
+        $subparts = Get-Subparts $auth $baseUrl $ws $tcId
+        foreach ($step in $subparts) {
+            if ($null -eq $step) { continue }
+            $stepId = if ($step.UniqueId) { $step.UniqueId } else { $step.Id }
+            if (-not $stepId) { continue }
+            try {
+                $stepFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${stepId}?depth=0"
+            } catch { continue }
+            if ($stepFull.Attributes) {
+                $modRefs += Find-ModuleRefsInAttributes $stepFull.Attributes
+            }
+            # Older shape fallback: nested module-ref props inline on the step.
+            $modRefs += Find-ModuleRefs $stepFull
+            if ($modRefs.Count -gt 0) { break }
+        }
+        # Older Tosca shape fallback: TestCase has inline TestSteps reachable via Find-ModuleRefs.
+        if ($modRefs.Count -eq 0) {
+            $modRefs += Find-ModuleRefs $tcFull
+        }
+        $modRefs = $modRefs | Select-Object -Unique
         if (-not $modRefs -or $modRefs.Count -eq 0) { continue }
 
         $modId = $modRefs[0]
@@ -393,8 +485,8 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
 
     if ($candidates.Count -eq 0) {
         Write-Host ""
-        Write-Host "No TestCases with Module references found in the first 20 results." -ForegroundColor Red
-        Write-Host "Capturing diagnostic from the first TestCase so the engineer can fix the heuristic..." -ForegroundColor Yellow
+        Write-Host "No TestCases with Module references found in the first 30 results." -ForegroundColor Red
+        Write-Host "Capturing diagnostic from the first TestCase + its Subparts so the engineer can fix..." -ForegroundColor Yellow
 
         $firstTc = @($tcs | Select-Object -First 1)[0]
         if ($firstTc) {
@@ -407,6 +499,25 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
                 $diagPath = "discovery-diagnostic.json"
                 $diagJson = $diagObj | ConvertTo-Json -Depth 30
                 $diagJson | Out-File -FilePath $diagPath -Encoding utf8
+
+                # Also dump the Subparts (TestSteps) -- Tosca 25.x doesn't inline them.
+                Write-Host "  walking Subparts for first 5 TestSteps..." -ForegroundColor DarkGray
+                $subDump = @()
+                $subs = Get-Subparts $auth $baseUrl $ws $firstId
+                foreach ($s in @($subs | Select-Object -First 5)) {
+                    $sid = if ($s.UniqueId) { $s.UniqueId } else { $s.Id }
+                    if (-not $sid) { continue }
+                    try {
+                        $subDump += Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${sid}?depth=0"
+                    } catch { continue }
+                }
+                if ($subDump.Count -gt 0) {
+                    $subPath = "discovery-diagnostic-subparts.json"
+                    $subDump | ConvertTo-Json -Depth 30 | Out-File -FilePath $subPath -Encoding utf8
+                    Write-Host "  $($subDump.Count) Subpart(s) saved -> $subPath" -ForegroundColor Green
+                } else {
+                    Write-Host "  Subparts walk returned 0 -- both /association/Subparts AND /treeview/<id>/subparts failed (or returned empty)." -ForegroundColor Red
+                }
                 Write-Host "  full body saved -> $diagPath  ($([math]::Round($diagJson.Length / 1KB, 1)) KB)" -ForegroundColor Green
 
                 Write-Host ""

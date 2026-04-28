@@ -224,9 +224,15 @@ function Get-OwnerUniqueId {
         }
     }
 
-    # Tier 3: Owner association lookup (Tosca 25.x canonical)
+    # Tier 3: Owner-association lookup. Names ordered per actual Tosca 25.x
+    # association catalogue (confirmed via /object/<id>/association on a real
+    # tenant): DirectOwner, OwningObject, ParentFolder are present; the older
+    # Owner/Parent/etc. names are kept as fallbacks for older Tosca builds.
     if ($Auth -and $Base -and $Workspace -and $ObjectId) {
-        foreach ($name in @('Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder')) {
+        foreach ($name in @(
+            'DirectOwner','OwningObject','ParentFolder',
+            'Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder'
+        )) {
             try {
                 $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$ObjectId/association/$name"
                 if ($r) {
@@ -318,11 +324,17 @@ function Get-StepModule {
     #   GET /<ws>/object/<stepId>/association/Module
     # Returns the Module object directly, or null if the step doesn't reference
     # one. Cleaner than scraping the TestStep's flat Attributes[] array.
+    # Tosca version variants probed in fallback order.
     param([hashtable]$Auth, [string]$Base, [string]$Workspace, [string]$StepId)
-    try {
-        $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$StepId/association/Module"
-        if ($r) { return $r }
-    } catch { }
+    foreach ($name in @('Module','OwnerModule','XModule','LinkedModule','ReferencedModule','ModuleReference')) {
+        try {
+            $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$StepId/association/$name"
+            if ($r) {
+                if ($r -is [System.Collections.IList] -and $r.Count -eq 0) { continue }
+                return $r
+            }
+        } catch { continue }
+    }
     return $null
 }
 
@@ -646,6 +658,24 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
                     Write-Host "  associations saved -> $assocPath" -ForegroundColor Green
                 } catch {
                     Write-Host "  /object/<id>/association also failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
+
+                # Also dump association names on a TestStep -- tells us the canonical
+                # name for the step's Module reference on this Tosca version.
+                if ($subDump.Count -gt 0) {
+                    $firstStep = $subDump[0]
+                    $stepId = if ($firstStep.UniqueId) { $firstStep.UniqueId } else { $firstStep.Id }
+                    if ($stepId) {
+                        Write-Host "  probing /object/$stepId/association for the FIRST TestStep's association names..." -ForegroundColor DarkGray
+                        try {
+                            $stepAssoc = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/$stepId/association"
+                            $stepAssocPath = "discovery-diagnostic-step-associations.json"
+                            $stepAssoc | ConvertTo-Json -Depth 30 | Out-File -FilePath $stepAssocPath -Encoding utf8
+                            Write-Host "  step associations saved -> $stepAssocPath" -ForegroundColor Green
+                        } catch {
+                            Write-Host "  step /association probe failed: $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
                 }
                 Write-Host "  full body saved -> $diagPath  ($([math]::Round($diagJson.Length / 1KB, 1)) KB)" -ForegroundColor Green
 

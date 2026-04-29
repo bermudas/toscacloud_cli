@@ -193,18 +193,28 @@ function Remove-ServerFields {
     return $Obj
 }
 
+$Script:OwnerProbeNames = @(
+    'DirectOwner','OwningObject','ParentFolder',
+    'OwnerComponent','Component','OwnerModuleFolder','ModuleFolder','OwnerSubdomain','Subdomain',
+    'OwningModuleFolder','OwningSubdomain','OwnerLibraryFolder','Container','ContainedIn','OwnedBy',
+    'Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder'
+)
+
 function Get-OwnerUniqueId {
     # Resolve the parent UniqueId for an object, probing in three fallback tiers:
     #   1. Top-level property on the deserialized body (older Tosca builds).
     #   2. Inside Attributes[] flat-metadata array (Tosca 25.x shape).
-    #   3. Via /object/<id>/association/Owner (the canonical Tosca 25.x path).
+    #   3. Via /object/<id>/association/<name> (the canonical Tosca 25.x path).
     # Tier 3 requires the auth + URL bits, which are now optional positional args.
+    # Pass [ref]$ProbeReport to capture per-probe outcomes when the caller wants
+    # diagnostics (used when Module-parent resolution fails).
     param(
         $Obj,
         [hashtable]$Auth = $null,
         [string]$Base = $null,
         [string]$Workspace = $null,
-        [string]$ObjectId = $null
+        [string]$ObjectId = $null,
+        [ref]$ProbeReport = $null
     )
 
     # Tier 1: top-level property
@@ -224,27 +234,37 @@ function Get-OwnerUniqueId {
         }
     }
 
-    # Tier 3: Owner-association lookup. Names ordered per actual Tosca 25.x
+    # Tier 3: per-name association probes. Names ordered per actual Tosca 25.x
     # association catalogue (confirmed via /object/<id>/association on a real
     # tenant): DirectOwner, OwningObject, ParentFolder are present on TestCases;
     # Modules may also expose Component/OwnerComponent/OwnerModuleFolder. Older
     # Owner/Parent/etc. names are kept as fallbacks for older Tosca builds.
     if ($Auth -and $Base -and $Workspace -and $ObjectId) {
-        foreach ($name in @(
-            'DirectOwner','OwningObject','ParentFolder',
-            'OwnerComponent','Component','OwnerModuleFolder','ModuleFolder','OwnerSubdomain','Subdomain',
-            'Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder'
-        )) {
+        foreach ($name in $Script:OwnerProbeNames) {
+            $outcome = 'unknown'
             try {
                 $r = Invoke-Tcrs $Auth 'GET' "$Base/$Workspace/object/$ObjectId/association/$name"
-                if ($r) {
+                if ($null -eq $r) {
+                    $outcome = 'null'
+                } elseif ($r -is [System.Collections.IList] -and $r.Count -eq 0) {
+                    $outcome = 'empty-array'
+                } else {
                     $first = if ($r -is [System.Collections.IList]) { @($r)[0] } else { $r }
-                    if ($first) {
-                        if ($first.UniqueId) { return $first.UniqueId }
-                        if ($first.Id)       { return $first.Id }
+                    if ($first -and $first.UniqueId) {
+                        if ($ProbeReport) { $ProbeReport.Value += [PSCustomObject]@{ Name = $name; Outcome = "hit:$($first.UniqueId)" } }
+                        return $first.UniqueId
                     }
+                    if ($first -and $first.Id) {
+                        if ($ProbeReport) { $ProbeReport.Value += [PSCustomObject]@{ Name = $name; Outcome = "hit:$($first.Id)" } }
+                        return $first.Id
+                    }
+                    $outcome = 'no-uniqueid'
                 }
-            } catch { continue }
+            } catch {
+                $msg = $_.Exception.Message
+                $outcome = if ($msg -match '404') { '404' } else { "error:$msg" }
+            }
+            if ($ProbeReport) { $ProbeReport.Value += [PSCustomObject]@{ Name = $name; Outcome = $outcome } }
         }
     }
 
@@ -517,10 +537,12 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         # Canonical (per devcorner 2023.2 docs):
         #   1. /<ws>/object/<tcId>/association/Items  -> TestSteps under the TestCase
         #   2. For each step: /<ws>/object/<stepId>/association/Module
-        #      -> the linked Module (server returns it directly).
+        #      -> a STUB { UniqueId, Revision } pointing at the linked Module.
+        #         You still need GET /object/<modId>?depth=0 to retrieve the
+        #         full Module body (Attributes[], etc.). Don't treat the stub
+        #         as a body -- Tier 1/2 owner-resolution will fail.
         # Fallbacks (older/different shapes): Subparts walk + Attribute scrape.
         $modRefs   = @()
-        $modFull   = $null
         $subparts = Get-Subparts $auth $baseUrl $ws $tcId
         foreach ($step in $subparts) {
             if ($null -eq $step) { continue }
@@ -533,7 +555,6 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
                 $candidate = if ($modAssoc.UniqueId) { $modAssoc.UniqueId } else { $modAssoc.Id }
                 if ($candidate) {
                     $modRefs += $candidate
-                    $modFull  = $modAssoc
                     break
                 }
             }
@@ -556,40 +577,49 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         if (-not $modRefs -or $modRefs.Count -eq 0) { continue }
 
         $modId = $modRefs[0]
-        if (-not $modFull) {
-            try {
-                $modFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${modId}?depth=0"
-            } catch { continue }
+        # Always fetch the full Module body. The /association/Module response is
+        # a stub { UniqueId, Revision } -- usable for the ID, useless for parent.
+        try {
+            $modFull = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/${modId}?depth=0"
+        } catch {
+            Write-Host "  skip $($tc.Name) -- could not fetch full Module body for $modId ($($_.Exception.Message))" -ForegroundColor DarkGray
+            continue
         }
 
-        # Pass auth + IDs so Get-OwnerUniqueId can fall through to /association/Owner
-        # when parent isn't inline on the body (Tosca 25.x case).
-        $tcParent  = Get-OwnerUniqueId $tcFull  $auth $baseUrl $ws $tcId
-        $modParent = Get-OwnerUniqueId $modFull $auth $baseUrl $ws $modId
+        # Pass auth + IDs so Get-OwnerUniqueId can fall through to /association/<name>
+        # when parent isn't inline on the body (Tosca 25.x case). Capture per-probe
+        # outcomes for Module-parent so we can pin down the actual association name
+        # if every probe misses.
+        $tcParent       = Get-OwnerUniqueId $tcFull  $auth $baseUrl $ws $tcId
+        $modProbeReport = @()
+        $modParent      = Get-OwnerUniqueId $modFull $auth $baseUrl $ws $modId ([ref]$modProbeReport)
         if (-not $tcParent -or -not $modParent) {
             $missing = if (-not $tcParent) { 'TC parent' } else { 'Module parent' }
             Write-Host "  skip $($tc.Name) -- could not resolve $missing UniqueId" -ForegroundColor DarkGray
 
-            # First time we see a Module-parent failure, dump the Module body +
-            # its association catalogue so the maintainer can see what parent
-            # association names this Tosca version actually exposes on Modules
-            # (which may differ from TestCases). Files are written next to
-            # trial.ps1 alongside the other discovery-diagnostic-* files.
+            # First time we see a Module-parent failure, dump the FULL Module body
+            # plus the per-probe report so the maintainer can see exactly which
+            # association names this Tosca version exposes (the response from
+            # /object/<id>/association enumeration 404s on Modules, so we can't
+            # list them; per-probe outcomes are the next best signal).
             if ($missing -eq 'Module parent' -and -not $script:moduleDiagDumped) {
                 $script:moduleDiagDumped = $true
                 Write-Host "    capturing Module-parent diagnostic for module $modId..." -ForegroundColor DarkGray
                 try {
                     $modFull | ConvertTo-Json -Depth 30 | Out-File -FilePath 'discovery-diagnostic-module.json' -Encoding utf8
-                    Write-Host "    Module body saved -> discovery-diagnostic-module.json" -ForegroundColor Green
+                    Write-Host "    full Module body saved -> discovery-diagnostic-module.json" -ForegroundColor Green
                 } catch {
                     Write-Host "    Module body dump failed: $($_.Exception.Message)" -ForegroundColor Red
                 }
                 try {
-                    $modAssocs = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/$modId/association"
-                    $modAssocs | ConvertTo-Json -Depth 30 | Out-File -FilePath 'discovery-diagnostic-module-associations.json' -Encoding utf8
-                    Write-Host "    Module associations saved -> discovery-diagnostic-module-associations.json" -ForegroundColor Green
+                    $modProbeReport | ConvertTo-Json -Depth 5 | Out-File -FilePath 'discovery-diagnostic-module-probes.json' -Encoding utf8
+                    Write-Host "    Module parent probe report saved -> discovery-diagnostic-module-probes.json" -ForegroundColor Green
+                    Write-Host "    Probe summary (any 'hit:...' wins; 404/empty-array means name not exposed):" -ForegroundColor DarkGray
+                    foreach ($p in $modProbeReport) {
+                        Write-Host ("      {0,-22} {1}" -f $p.Name, $p.Outcome) -ForegroundColor DarkGray
+                    }
                 } catch {
-                    Write-Host "    Module association probe failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "    probe report dump failed: $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
             continue

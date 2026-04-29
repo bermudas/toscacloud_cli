@@ -551,12 +551,46 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
 
             # Primary path: ask the server for the step's Module association.
             $modAssoc = Get-StepModule $auth $baseUrl $ws $stepId
+
+            # One-time diagnostic dump: capture the actual response shape for
+            # the first step that returns ANYTHING, so we can see whether
+            # /association/Module returns the canonical stub { UniqueId,
+            # Revision } or some version-specific other shape.
+            if ($modAssoc -and -not $script:stepModuleDumped) {
+                $script:stepModuleDumped = $true
+                try {
+                    $modAssoc | ConvertTo-Json -Depth 30 | Out-File -FilePath 'discovery-diagnostic-step-module-response.json' -Encoding utf8
+                } catch { }
+            }
+
             if ($modAssoc) {
-                $candidate = if ($modAssoc.UniqueId) { $modAssoc.UniqueId } else { $modAssoc.Id }
-                if ($candidate) {
-                    $modRefs += $candidate
-                    break
+                # Extract a candidate UniqueId from possible response shapes:
+                #   - stub:        { UniqueId: "<guid>", Revision: int }
+                #   - array:       [ { UniqueId: "<guid>", ... }, ... ]
+                #   - wrapped:     { Module: { UniqueId: "<guid>", ... } }
+                $candidates = @()
+                if ($modAssoc -is [System.Collections.IList]) {
+                    foreach ($it in $modAssoc) {
+                        if ($it.UniqueId) { $candidates += $it.UniqueId }
+                        elseif ($it.Id)    { $candidates += $it.Id }
+                    }
+                } elseif ($modAssoc.UniqueId) {
+                    $candidates += $modAssoc.UniqueId
+                } elseif ($modAssoc.Id) {
+                    $candidates += $modAssoc.Id
+                } elseif ($modAssoc.Module -and $modAssoc.Module.UniqueId) {
+                    $candidates += $modAssoc.Module.UniqueId
                 }
+                # Validate -- only accept proper Tosca UniqueIds (ULID or hyphenated GUID).
+                # Anything else (integer index, short string, etc.) is a 25.x
+                # response we don't yet understand -- skip it and let the
+                # diagnostic dump above tell us the right shape.
+                foreach ($c in $candidates) {
+                    if ($c -is [string] -and (Test-IsToscaUniqueId $c)) {
+                        $modRefs += $c
+                    }
+                }
+                if ($modRefs.Count -gt 0) { break }
             }
 
             # Fallback: scrape the step's Attributes[] for a module-ref pair.
@@ -760,6 +794,9 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         Write-Host "  1. The contents of  $diagPath  (full first-TestCase body, sanitize values if needed)"
         Write-Host "  2. The 'Distinct keys' table above"
         Write-Host "  3. The 'Top-level property names' table above"
+        if (Test-Path 'discovery-diagnostic-step-module-response.json') {
+            Write-Host "  4. discovery-diagnostic-step-module-response.json (raw /association/Module response shape)"
+        }
         Write-Host "He'll add the right key name to Find-ModuleRefs and re-ship." -ForegroundColor Magenta
         return
     }

@@ -226,11 +226,13 @@ function Get-OwnerUniqueId {
 
     # Tier 3: Owner-association lookup. Names ordered per actual Tosca 25.x
     # association catalogue (confirmed via /object/<id>/association on a real
-    # tenant): DirectOwner, OwningObject, ParentFolder are present; the older
+    # tenant): DirectOwner, OwningObject, ParentFolder are present on TestCases;
+    # Modules may also expose Component/OwnerComponent/OwnerModuleFolder. Older
     # Owner/Parent/etc. names are kept as fallbacks for older Tosca builds.
     if ($Auth -and $Base -and $Workspace -and $ObjectId) {
         foreach ($name in @(
             'DirectOwner','OwningObject','ParentFolder',
+            'OwnerComponent','Component','OwnerModuleFolder','ModuleFolder','OwnerSubdomain','Subdomain',
             'Owner','Owners','OwnerObject','Parent','ParentObject','OwnerFolder'
         )) {
             try {
@@ -567,6 +569,29 @@ if (-not $TestCaseId -or -not $ModuleId -or -not $TestCaseParentId -or -not $Mod
         if (-not $tcParent -or -not $modParent) {
             $missing = if (-not $tcParent) { 'TC parent' } else { 'Module parent' }
             Write-Host "  skip $($tc.Name) -- could not resolve $missing UniqueId" -ForegroundColor DarkGray
+
+            # First time we see a Module-parent failure, dump the Module body +
+            # its association catalogue so the maintainer can see what parent
+            # association names this Tosca version actually exposes on Modules
+            # (which may differ from TestCases). Files are written next to
+            # trial.ps1 alongside the other discovery-diagnostic-* files.
+            if ($missing -eq 'Module parent' -and -not $script:moduleDiagDumped) {
+                $script:moduleDiagDumped = $true
+                Write-Host "    capturing Module-parent diagnostic for module $modId..." -ForegroundColor DarkGray
+                try {
+                    $modFull | ConvertTo-Json -Depth 30 | Out-File -FilePath 'discovery-diagnostic-module.json' -Encoding utf8
+                    Write-Host "    Module body saved -> discovery-diagnostic-module.json" -ForegroundColor Green
+                } catch {
+                    Write-Host "    Module body dump failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
+                try {
+                    $modAssocs = Invoke-Tcrs $auth 'GET' "$baseUrl/$ws/object/$modId/association"
+                    $modAssocs | ConvertTo-Json -Depth 30 | Out-File -FilePath 'discovery-diagnostic-module-associations.json' -Encoding utf8
+                    Write-Host "    Module associations saved -> discovery-diagnostic-module-associations.json" -ForegroundColor Green
+                } catch {
+                    Write-Host "    Module association probe failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
             continue
         }
 

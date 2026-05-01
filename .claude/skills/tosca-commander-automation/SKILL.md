@@ -252,6 +252,7 @@ Some operational signals **cannot** be retrieved via TCRS — they live on the s
 
 ## Cross-reference
 
+- **Full TCRS endpoint table**: `references/api-endpoints.md` — all routes (global, workspace, object, association, task, treeview, resource, TQL), extracted from the TCRS help page at `/rest/toscacommander`. Includes method, operation name, key notes, and the KB0021775 log-walk pattern.
 - Source of REST endpoint surface: `documentation.tricentis.com/devcorner/2024.1/tcrsapi/` (REST API / Requests / Object revisions / Caching).
 - Troubleshooting: KB0012713 — health checks, common HTTP/auth/proxy errors.
 - Screenshot retrieval pattern: KB0021775.
